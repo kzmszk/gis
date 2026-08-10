@@ -350,10 +350,21 @@ beads の依存グラフをそのまま使う。gis 側の実装は
 「`bd ready --exclude-label human` を引く」の1箇所だけ。
 
 ```
-[bead A] ──┐
-[bead B] ──┼──> [ゲート bead (label: human)] ──> [後続 bead D, E]
-[bead C] ──┘         ↑ gis は絶対に触らない        ↑ bd ready に現れない
+[source A/B/C] ──(blocked handoff, edge is replaced)──┐
+                                                      ├──> [後続 bead D, E]
+[ゲート bead (label: human)] ──────────────────────────┘
+          ↑ gis は絶対に触らない                       ↑ bd ready に現れない
 ```
+
+ここで `needs_human` を返した source は handoff のため `blocked` になる。
+したがって gis は gate を source の依存先にはしない（blocked source に
+gate を依存させると通常の `bd human respond` が gate を close できず、
+グラフがデッドロックする）。source を直接 blocker とする既存の後続 bead
+があれば、gis は `gate -> 後続` の edge を先に追加してから
+`source -> 後続` の edge を外す。source 自体は blocked のまま worktree と
+handoff を保持し、human が gate に応答して close した時点で後続だけが
+`bd ready` に現れる。source を参照する edge が無い場合も、gate は独立した
+human checkpoint として作成され、後から gate を依存先にした後続を止める。
 
 1. `--exclude-label human` により、ゲート bead は**ディスパッチ対象から構造的に除外される**
 2. 後続は依存でブロックされ、`bd ready` に現れない。gis は存在すら知らない
