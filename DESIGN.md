@@ -113,6 +113,7 @@ herdr は claude / codex / pi を一級市民として認識し、`working / blo
 ```
 bd ready --exclude-label human
   └ 優先度順に空きスロットへ（決定的、LLM 不使用）
+      └ bead の type / profile: ラベルからプロファイルを解決（第5章）
       └ herdr worktree create --branch <bead-id> --base main
       └ .gis/run/prompt.md を書く
       └ herdr agent start --kind <実装kind>
@@ -169,7 +170,16 @@ verify は無料（数十秒の CPU）、レビューは有料（サブスク枠
 
 ---
 
-## 5. 承認・自律性
+## 5. ワーカーの起動設定（モデル・effort・承認）
+
+ワーカーの挙動は、すべて **`herdr agent start` の trailing args としてエージェントに素通しされる起動時フラグ**で決まる。
+
+```
+herdr agent start <NAME> --kind <KIND> --pane <ID> [-- [AGENT_ARG]...]
+                                                     ↑ ここから先がエージェントに渡る
+```
+
+### 5.1 承認・自律性
 
 ```
 claude --permission-mode auto
@@ -190,6 +200,71 @@ codex  -a on-request -s workspace-write
 > 既知のトレードオフ: `auto` にすると `blocked` の発火頻度が下がる。
 > 危険な操作では依然エスカレートするので壊れはしないが、
 > 「気づける粒度が粗くなる」ことは受け入れた上での選択である。
+
+### 5.2 モデルプロファイル
+
+役割ごとにモデルと effort を事前に決めておく。
+
+| | モデル | effort |
+|---|---|---|
+| claude | `--model opus` / `--model claude-opus-5` | `--effort <low\|medium\|high\|xhigh\|max>` |
+| codex | `-m gpt-5.6-luna` | `-c model_reasoning_effort="xhigh"` |
+
+codex 側は専用フラグではなく config 上書きだが、`~/.codex/config.toml` の
+`model` / `model_reasoning_effort` と同じキーなので確実である。
+
+**プロファイルは順序付きの候補リスト**とする。gis は先頭から順に、
+空きスロットのある最初の候補を選ぶ。
+
+```
+plan       claude/opus/medium  →  codex/gpt-5.6-sol/high
+implement  codex/gpt-5.6-luna/xhigh  →  claude/opus/xhigh
+review     claude/opus/xhigh   →  codex/gpt-5.6-sol/xhigh
+```
+
+**モデル名は gis 側で検証しない。** `kinds` と同じく素通しの設定値として扱う。
+モデルは頻繁に増減するので、バリデーションを持つと gis 自体の更新が必要になる。
+
+### 5.3 プロファイルの選択
+
+| 役割 | 選択方法 |
+|---|---|
+| `review` | パイプラインの段階なので gis が自明に判定する |
+| `plan` | bead の **type が `decision` または `epic`** |
+| `implement` | 上記以外（デフォルト） |
+| 上書き | bead に `profile:<name>` ラベルがあればそれを優先 |
+
+beads の `decision` 型は「設計判断を記録する issue」として標準で存在するため、
+ラベルで別軸を作るより既にある型を使うほうが増える概念が少ない。
+取りこぼしは必ずあるので `profile:` ラベルでの明示的上書きを認める。
+**これは決定的な判定であり、LLM に振り分けさせるわけではない。**
+
+### 5.4 候補フォールバック
+
+発火条件は **起動失敗のみ**。`herdr agent start` が失敗した場合、
+または起動後に結果ファイルを残さず短時間で終了した場合、次の候補に移る。
+
+**端末スナップショットの文字列照合（レート制限メッセージの検出など）は行わない。**
+第2章で構造的に禁じた「画面を読んで判断する」経路を復活させることになり、
+しかもメッセージの文言は予告なく変わるため、静かに壊れて
+「なぜかフォールバックしない」という最も気づきにくい故障になる。
+
+起動できたかどうかという二値なら、レート制限に限らず
+あらゆる起動失敗（設定ミス、モデル名の typo、認証切れ）を同じ経路で拾える。
+
+> **できないこと**: 残量を事前に照会する手段は、どちらの CLI にも存在しない
+> （`codex doctor --json` は auth とランタイム健全性のみ、claude の `/usage` は TUI 専用、
+> `claude --fallback-model` は `--print` 専用で対話モードでは使えない）。
+> したがって「codex の残りが少ないから claude にする」という**予測的な振り分けは実装できない**。
+> 走行中の枯渇は結果ファイル欠損として現れ、最終的に `blocked` に落ちる。
+> 対処は第6章の通り、人間が `concurrency` を下げるか候補順を入れ替えて `gis run` を叩き直すこと。
+> 実行が一回で完結する（第10章）ため、実行と実行の間が自然な調整点になっている。
+
+### 5.5 レビュアーの kind 決定順序
+
+レビュアーは実装と必ず違う kind を使う（第4章）。
+候補フォールバックがあるため、**実装がどちらの候補で走ったかが確定してから**
+`review` プロファイルの候補リストを走査し、実装で使った kind を除外して最初の候補を選ぶ。
 
 ---
 
@@ -347,6 +422,29 @@ verify_max = 5
 review_max = 3
 blocked_timeout = "15m"
 claude_permission_mode = "auto"  # 使えなければ "acceptEdits"
+
+# --- モデルプロファイル（第5章）: 順序付き候補リスト、先頭優先 ---
+
+[[profiles.plan]]                # bead type が decision / epic
+kind = "claude"; model = "opus";          effort = "medium"
+[[profiles.plan]]
+kind = "codex";  model = "gpt-5.6-sol";   effort = "high"
+
+[[profiles.implement]]           # 上記以外（デフォルト）
+kind = "codex";  model = "gpt-5.6-luna";  effort = "xhigh"
+[[profiles.implement]]
+kind = "claude"; model = "opus";          effort = "xhigh"
+
+[[profiles.review]]              # 段階2。実装で使った kind は除外される
+kind = "claude"; model = "opus";          effort = "xhigh"
+[[profiles.review]]
+kind = "codex";  model = "gpt-5.6-sol";   effort = "xhigh"
+```
+
+bead 側での上書き:
+
+```bash
+bd create --labels profile:plan ...   # 型に関わらず plan プロファイルを使う
 ```
 
 ### ディレクトリ規約
@@ -440,3 +538,8 @@ pi を「設定値の1つ」に留めた判断が、このリスクを封じ込�
 | 23 | ゲートは human ラベル + 依存関係 | 「進まない」がグラフの形で保証される |
 | 24 | マージゲートは作らない | 直列キューの順序保証が濁る |
 | 25 | 段階1はレビューなしで動かす | 土台が動く前にレビューを調整すると切り分けできない |
+| 26 | 役割ごとのモデル/effort をプロファイルとして設定に持つ | 決め打ちのコストがコードでなく設定に乗るなら、判断を固定する方が結果が良い |
+| 27 | プロファイルは順序付き候補リスト | 「A or B」という要件をそのまま表現でき、フォールバックと同じ機構で済む |
+| 28 | プロファイル選択は bead の type + `profile:` ラベル上書き | `decision` 型は beads 標準で意味が一致する／増える概念が少ない |
+| 29 | フォールバックは起動失敗のみで発火 | 画面の文字列照合は禁じた経路の復活であり、文言変更で静かに壊れる |
+| 30 | モデル名を検証しない | モデルは頻繁に増減する。素通しなら gis の更新が要らない |
