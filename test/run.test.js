@@ -59,7 +59,17 @@ function dependencies(resultRoot) {
       events.push(`start:${issue.id}`);
       return {
         prompt: { resultPath: join(resultRoot, `${issue.id}.json`) },
-        started: {},
+        started: {
+          agent: {
+            pane_id: `pane-${issue.id}`,
+            agent_session: {
+              source: "runner",
+              agent: "codex",
+              kind: "id",
+              value: `session-${issue.id}`,
+            },
+          },
+        },
         prompted: {},
       };
     },
@@ -406,8 +416,15 @@ test("creates a human gate in the run loop when the worker requests confirmation
           return { status: "done", wasBlocked: false, worktreeRetained: true };
         },
       },
-      resolveTranscript: async () => {
+      resolveTranscript: async (session, worktreePath) => {
         transcriptResolutions += 1;
+        assert.deepEqual(session, {
+          source: "runner",
+          agent: "codex",
+          kind: "id",
+          value: "session-gis-vst.22",
+        });
+        assert.equal(worktreePath, "/repo/.worktrees/gis-vst.22");
         return "/home/kazu/.codex/sessions/current.jsonl";
       },
       report: (message) => calls.push(["summary", message]),
@@ -424,6 +441,87 @@ test("creates a human gate in the run loop when the worker requests confirmation
     assert.equal(calls[1][2].transcriptPath, "/home/kazu/.codex/sessions/current.jsonl");
     assert.equal(transcriptResolutions, 1);
     assert.match(calls.at(-1)[1], /1件が人間の確認待ち/);
+  } finally {
+    await rm(resultRoot, { recursive: true, force: true });
+  }
+});
+
+test("obtains a late agent session from the matching herdr pane", async () => {
+  const resultRoot = await mkdtemp(join(tmpdir(), "gis-run-session-snapshot-"));
+  const source = bead("gis-vst.session-snapshot");
+  let ready = true;
+  let resolvedSession;
+  await writeFile(join(resultRoot, `${source.id}.json`), JSON.stringify({
+    status: "failed",
+    summary: "waiting",
+    needs_human: "inspect state",
+  }));
+
+  try {
+    const deps = dependencies(resultRoot);
+    const result = await runForegroundLoop({
+      config: config({ concurrency: 1 }),
+      beads: {
+        async ready() {
+          if (!ready) return [];
+          ready = false;
+          return [source];
+        },
+        async dispatch() {
+          return { ...source, status: "in_progress" };
+        },
+        async markBlocked() {
+          return { ...source, status: "blocked" };
+        },
+        async createHumanGate() {
+          return { ...bead("gis-vst.human-session"), labels: ["human"] };
+        },
+      },
+      worktrees: deps.worktrees,
+      workers: {
+        async start({ bead: issue }) {
+          return {
+            prompt: { resultPath: join(resultRoot, `${issue.id}.json`) },
+            started: { agent: { pane_id: `pane-${issue.id}` } },
+            prompted: { agent: { pane_id: `pane-${issue.id}` } },
+          };
+        },
+      },
+      blocked: {
+        async wait() {
+          return { status: "done", wasBlocked: false, worktreeRetained: true };
+        },
+      },
+      herdr: {
+        async agentWait() {
+          throw new Error("unused");
+        },
+        async apiSnapshot() {
+          return {
+            type: "session_snapshot",
+            snapshot: {
+              agents: [{
+                pane_id: `pane-${source.id}`,
+                agent_session: {
+                  source: "runner",
+                  agent: "codex",
+                  kind: "id",
+                  value: "exact-session-id",
+                },
+              }],
+            },
+          };
+        },
+      },
+      resolveTranscript: async (session) => {
+        resolvedSession = session;
+        return "/home/kazu/.codex/sessions/exact-session.jsonl";
+      },
+      report: () => undefined,
+    });
+
+    assert.equal(result.humanWaiting, 1);
+    assert.equal(resolvedSession.value, "exact-session-id");
   } finally {
     await rm(resultRoot, { recursive: true, force: true });
   }

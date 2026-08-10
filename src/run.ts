@@ -4,6 +4,11 @@ import { createBeadsAdapter } from "./beads.js";
 import type { GisConfig } from "./config.js";
 import { loadConfig } from "./config.js";
 import { createHerdrAdapter } from "./herdr.js";
+import type {
+  AgentInfo,
+  AgentSessionInfo,
+  SessionSnapshotResult,
+} from "./herdr.js";
 import {
   SerialMergeQueue,
   type MergeQueueItem,
@@ -11,7 +16,7 @@ import {
 } from "./merge.js";
 import { startWithProfileFallback } from "./profiles.js";
 import { readWorkerResult, type ResultFileState } from "./result.js";
-import { resolveTranscriptPath, type TranscriptKind } from "./transcripts.js";
+import { resolveAgentSessionTranscript } from "./transcripts.js";
 import {
   waitForAgentWithBlockedHandling,
   type AgentWaitHandlingResult,
@@ -48,7 +53,9 @@ export interface RunBeadsSource {
 export type RunHerdrSource = WorktreeLifecycleSource &
   WorkerStartupSource &
   WorkerPromptSource &
-  BlockedHerdrSource;
+  BlockedHerdrSource & {
+    apiSnapshot?(): Promise<SessionSnapshotResult>;
+  };
 
 export interface RunWorktreeSource {
   create(options: CreateBeadWorktreeOptions): Promise<BeadWorktree>;
@@ -82,9 +89,8 @@ export interface RunOptions {
   readonly verify?: RunVerifySource;
   readonly merge?: RunMergeSource;
   readonly resolveTranscript?: (
-    kind: TranscriptKind,
+    session: AgentSessionInfo,
     worktreePath: string,
-    options?: { readonly modifiedAfterMs?: number },
   ) => Promise<string | undefined>;
   readonly report?: (message: string) => void;
 }
@@ -144,20 +150,27 @@ function summaryText(merged: number, blocked: number, humanWaiting: number): str
   return `${merged}件マージ / ${blocked}件 blocked / ${humanWaiting}件が人間の確認待ち`;
 }
 
-async function resolveKnownTranscript(
-  kind: string,
-  worktreePath: string,
-  resolver: (
-    kind: TranscriptKind,
-    worktreePath: string,
-    options?: { readonly modifiedAfterMs?: number },
-  ) => Promise<string | undefined>,
-  modifiedAfterMs?: number,
-): Promise<string | undefined> {
-  if (kind !== "claude" && kind !== "codex") {
-    return undefined;
+function agentSession(agent: AgentInfo | undefined): AgentSessionInfo | undefined {
+  return agent?.agent_session ?? undefined;
+}
+
+async function findWorkerSession(
+  started: StartedWorker,
+  beadId: string,
+  herdr: RunHerdrSource,
+): Promise<AgentSessionInfo | undefined> {
+  const direct = agentSession(started.prompted?.agent) ?? agentSession(started.started?.agent);
+  if (direct !== undefined || herdr.apiSnapshot === undefined) {
+    return direct;
   }
-  return resolver(kind, worktreePath, { modifiedAfterMs });
+
+  const paneId = started.prompted?.agent?.pane_id ?? started.started?.agent?.pane_id;
+  const agents = (await herdr.apiSnapshot()).snapshot.agents;
+  const exactPane = paneId === undefined
+    ? undefined
+    : agents.find((agent) => agent.pane_id === paneId);
+  const named = agents.find((agent) => agent.name === beadId);
+  return agentSession(exactPane) ?? agentSession(named);
 }
 
 export function formatRunSummary(summary: Omit<RunSummary, "text">): string {
@@ -209,7 +222,7 @@ export async function runForegroundLoop(options: RunOptions = {}): Promise<RunSu
     verifyTimeout: config.verify_timeout,
     beads,
   });
-  const resolveTranscript = options.resolveTranscript ?? resolveTranscriptPath;
+  const resolveTranscript = options.resolveTranscript ?? resolveAgentSessionTranscript;
   const report = options.report ?? ((message: string) => console.log(message));
   const active = new Map<string, Promise<JobOutcome>>();
   const humanFromWorkers = new Set<string>();
@@ -237,8 +250,6 @@ export async function runForegroundLoop(options: RunOptions = {}): Promise<RunSu
 
     let started: StartedWorker | undefined;
     let workerKind: string | undefined;
-    const workerStartedAfterMs = Date.now() - 5_000;
-
     try {
       const selection = await startWithProfileFallback(
         bead,
@@ -269,14 +280,15 @@ export async function runForegroundLoop(options: RunOptions = {}): Promise<RunSu
       return { status: "blocked" };
     }
 
+    let resolvedSession: AgentSessionInfo | undefined;
     const currentTranscriptPath = async (): Promise<string> => {
       try {
-        return await resolveKnownTranscript(
-          workerKind!,
-          worktree.path,
-          resolveTranscript,
-          workerStartedAfterMs,
-        ) ?? defaultTranscriptPath(workerKind!, worktree.path);
+        resolvedSession ??= await findWorkerSession(started, bead.id, herdr);
+        if (resolvedSession === undefined) {
+          return defaultTranscriptPath(workerKind!, worktree.path);
+        }
+        return await resolveTranscript(resolvedSession, worktree.path) ??
+          defaultTranscriptPath(workerKind!, worktree.path);
       } catch {
         return defaultTranscriptPath(workerKind!, worktree.path);
       }

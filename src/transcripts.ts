@@ -2,7 +2,8 @@ import { createReadStream } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { homedir } from "node:os";
-import { extname, join, resolve } from "node:path";
+import { basename, extname, isAbsolute, join, resolve } from "node:path";
+import type { AgentSessionInfo } from "./herdr.js";
 
 export type TranscriptKind = "claude" | "codex";
 
@@ -84,6 +85,17 @@ function isMissingPath(error: unknown): boolean {
     "code" in error &&
     ((error as NodeJS.ErrnoException).code === "ENOENT" ||
       (error as NodeJS.ErrnoException).code === "ENOTDIR");
+}
+
+async function existingFile(path: string): Promise<string | undefined> {
+  try {
+    return (await stat(path)).isFile() ? path : undefined;
+  } catch (error: unknown) {
+    if (isMissingPath(error)) {
+      return undefined;
+    }
+    throw error;
+  }
 }
 
 /**
@@ -200,6 +212,60 @@ function sessionCwdFromRecord(value: unknown): string | undefined {
   return typeof cwd === "string" && cwd.length > 0 ? cwd : undefined;
 }
 
+interface CodexSessionMetadata {
+  readonly id: string | undefined;
+  readonly cwd: string | undefined;
+}
+
+function codexMetadataFromRecord(value: unknown): CodexSessionMetadata | undefined {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  if (record.type !== "session_meta") {
+    return undefined;
+  }
+  const payload = record.payload;
+  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
+    return undefined;
+  }
+  const metadata = payload as Record<string, unknown>;
+  return {
+    id: typeof metadata.id === "string" && metadata.id.length > 0 ? metadata.id : undefined,
+    cwd: typeof metadata.cwd === "string" && metadata.cwd.length > 0 ? metadata.cwd : undefined,
+  };
+}
+
+async function readCodexSessionMetadata(
+  path: string,
+  maxLines: number,
+): Promise<CodexSessionMetadata | undefined> {
+  const input = createReadStream(path, { encoding: "utf8" });
+  const lines = createInterface({ input, crlfDelay: Infinity });
+  let lineCount = 0;
+
+  try {
+    for await (const line of lines) {
+      lineCount += 1;
+      try {
+        const metadata = codexMetadataFromRecord(JSON.parse(line) as unknown);
+        if (metadata !== undefined) {
+          return metadata;
+        }
+      } catch {
+        // A malformed record does not make the rest of the session unusable.
+      }
+      if (lineCount >= maxLines) {
+        break;
+      }
+    }
+    return undefined;
+  } finally {
+    lines.close();
+    input.destroy();
+  }
+}
+
 async function readSessionCwd(path: string, maxLines: number): Promise<string | undefined> {
   const input = createReadStream(path, { encoding: "utf8" });
   const lines = createInterface({ input, crlfDelay: Infinity });
@@ -225,6 +291,83 @@ async function readSessionCwd(path: string, maxLines: number): Promise<string | 
     lines.close();
     input.destroy();
   }
+}
+
+function sessionPath(
+  value: string,
+  cwd: string,
+  options: TranscriptResolverOptions,
+): string {
+  if (value === "~") {
+    return homeDirectory(options);
+  }
+  if (value.startsWith("~/")) {
+    return join(homeDirectory(options), value.slice(2));
+  }
+  return isAbsolute(value) ? resolve(value) : resolve(cwd, value);
+}
+
+function filenameHasSessionId(path: string, sessionId: string): boolean {
+  const name = basename(path, ".jsonl");
+  return name === sessionId || name.endsWith(`-${sessionId}`);
+}
+
+async function resolveClaudeSessionId(
+  sessionId: string,
+  cwd: string,
+  options: TranscriptResolverOptions,
+): Promise<string | undefined> {
+  return existingFile(join(claudeProjectDirectory(cwd, options), `${sessionId}.jsonl`));
+}
+
+async function resolveCodexSessionId(
+  sessionId: string,
+  cwd: string,
+  options: TranscriptResolverOptions,
+): Promise<string | undefined> {
+  const expectedCwd = absoluteCwd(cwd);
+  const candidates = (await jsonlFiles(codexSessionsDirectory(options), true))
+    .filter((path) => filenameHasSessionId(path, sessionId));
+
+  for (const candidate of candidates) {
+    let metadata: CodexSessionMetadata | undefined;
+    try {
+      metadata = await readCodexSessionMetadata(candidate, metadataLineLimit(options));
+    } catch (error: unknown) {
+      if (!isMissingPath(error)) {
+        throw error;
+      }
+      continue;
+    }
+    if (metadata?.id === sessionId &&
+      metadata.cwd !== undefined &&
+      absoluteCwd(metadata.cwd) === expectedCwd) {
+      return candidate;
+    }
+  }
+  return undefined;
+}
+
+/** Resolve the exact transcript reference reported by herdr for one agent session. */
+export async function resolveAgentSessionTranscript(
+  session: AgentSessionInfo,
+  cwd: string,
+  options: TranscriptResolverOptions = {},
+): Promise<string | undefined> {
+  requireNonEmpty(session.value, "session.value");
+  if (session.kind === "path") {
+    return existingFile(sessionPath(session.value, cwd, options));
+  }
+  if (session.kind !== "id") {
+    throw new TypeError(`unsupported agent session reference kind: ${String(session.kind)}`);
+  }
+  if (session.agent === "claude") {
+    return resolveClaudeSessionId(session.value, cwd, options);
+  }
+  if (session.agent === "codex") {
+    return resolveCodexSessionId(session.value, cwd, options);
+  }
+  return undefined;
 }
 
 async function matchingCodexFiles(

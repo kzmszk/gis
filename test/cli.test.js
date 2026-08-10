@@ -149,11 +149,14 @@ test("gis run connects default bd, herdr, and git adapters through merge cleanup
           argv: request.params.args ?? [],
         };
       } else if (request.method === "agent.prompt") {
-        await writeFile(
-          join(worktreePath, ".gis", "run", "round-1-impl.json"),
-          '{"status":"done","summary":"CLI worker completed"}',
-          "utf8",
-        );
+        await Promise.all([
+          writeFile(
+            join(worktreePath, ".gis", "run", "round-1-impl.json"),
+            '{"status":"done","summary":"CLI worker completed"}',
+            "utf8",
+          ),
+          writeFile(join(worktreePath, ".gis", "run", "worker.jsonl"), "{}\n", "utf8"),
+        ]);
         result = {
           type: "agent_prompted",
           agent: {
@@ -161,6 +164,12 @@ test("gis run connects default bd, herdr, and git adapters through merge cleanup
             workspace_id: `ws-${bead.id}`,
             tab_id: `tab-${bead.id}`,
             agent_status: "working",
+            agent_session: {
+              source: "integration-test",
+              agent: "codex",
+              kind: "path",
+              value: join(worktreePath, ".gis", "run", "worker.jsonl"),
+            },
           },
         };
       } else if (request.method === "agent.wait") {

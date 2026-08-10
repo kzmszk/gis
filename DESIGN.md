@@ -305,7 +305,12 @@ claude / codex は既に cwd ごとに完全な JSONL トランスクリプト�
 - `~/.claude/projects/<cwd-slug>/*.jsonl`
 - `~/.codex/sessions/<year>/...`
 
-worktree ごとに cwd が違うので自動的に分離される。
+worktree ごとに cwd が違うので自動的に分離される。ただし、同じ worktree で複数セッションが
+動く可能性があるため、更新日時だけでは対応関係を決めない。herdr が agent ごとに報告する
+`agent_session`（`id` または `path`）から対象 JSONL を特定し、session ID と Codex の
+`session_meta.cwd` も一致することを確認する。session 参照を取得できない場合は別セッションを
+推測せず、索引を `unresolved` として残す。
+
 **gis が残すのは「どの bead が、どの worktree で、どのトランスクリプトに対応するか」という索引だけ。**
 
 ### ラウンドの応酬は worktree 内に番号付きで残す

@@ -80,6 +80,7 @@ export interface PaneInfo {
   workspace_id: string;
   tab_id: string;
   agent_status: AgentStatus;
+  agent_session?: AgentSessionInfo | null;
   [key: string]: unknown;
 }
 
@@ -116,7 +117,15 @@ export interface AgentInfo {
   workspace_id: string;
   tab_id: string;
   agent_status: AgentStatus;
+  agent_session?: AgentSessionInfo | null;
   [key: string]: unknown;
+}
+
+export interface AgentSessionInfo {
+  source: string;
+  agent: string;
+  kind: "id" | "path";
+  value: string;
 }
 
 export interface AgentStartedResult {

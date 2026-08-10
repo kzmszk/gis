@@ -8,6 +8,7 @@ import {
   claudeProjectSlug,
   listClaudeTranscripts,
   listCodexTranscripts,
+  resolveAgentSessionTranscript,
   resolveBeadTranscriptIndex,
   resolveTranscriptIndex,
   resolveTranscriptPath,
@@ -68,6 +69,79 @@ test("resolves the newest Claude transcript and matching Codex session", async (
       claude: claudeNewest,
       codex: codexMatch,
     });
+  });
+});
+
+test("resolves the exact Claude session ID instead of the newest transcript", async () => {
+  await withTranscriptRoots(async (_home, options) => {
+    const cwd = "/repo/.worktrees/gis-vst.12";
+    const directory = claudeProjectDirectory(cwd, options);
+    await mkdir(directory, { recursive: true });
+    const selected = join(directory, "session-selected.jsonl");
+    const newer = join(directory, "session-newer.jsonl");
+    await writeFile(selected, "{}\n", "utf8");
+    await writeFile(newer, "{}\n", "utf8");
+    await utimes(selected, new Date(1000), new Date(1000));
+    await utimes(newer, new Date(2000), new Date(2000));
+
+    assert.equal(await resolveAgentSessionTranscript({
+      source: "claude-projects",
+      agent: "claude",
+      kind: "id",
+      value: "session-selected",
+    }, cwd, options), selected);
+  });
+});
+
+test("resolves the exact Codex session ID and validates its cwd", async () => {
+  await withTranscriptRoots(async (home, options) => {
+    const cwd = "/repo/.worktrees/gis-vst.12";
+    const directory = join(home, ".codex", "sessions", "2026", "08", "10");
+    await mkdir(directory, { recursive: true });
+    const selected = join(directory, "rollout-2026-08-10-session-selected.jsonl");
+    const sameCwd = join(directory, "rollout-2026-08-10-session-newer.jsonl");
+    const wrongCwd = join(directory, "rollout-2026-08-10-session-wrong-cwd.jsonl");
+    await writeFile(selected, JSON.stringify({
+      type: "session_meta",
+      payload: { id: "session-selected", cwd },
+    }) + "\n", "utf8");
+    await writeFile(sameCwd, JSON.stringify({
+      type: "session_meta",
+      payload: { id: "session-newer", cwd },
+    }) + "\n", "utf8");
+    await writeFile(wrongCwd, JSON.stringify({
+      type: "session_meta",
+      payload: { id: "session-wrong-cwd", cwd: "/repo/other" },
+    }) + "\n", "utf8");
+
+    assert.equal(await resolveAgentSessionTranscript({
+      source: "codex-sessions",
+      agent: "codex",
+      kind: "id",
+      value: "session-selected",
+    }, cwd, options), selected);
+    assert.equal(await resolveAgentSessionTranscript({
+      source: "codex-sessions",
+      agent: "codex",
+      kind: "id",
+      value: "session-wrong-cwd",
+    }, cwd, options), undefined);
+  });
+});
+
+test("uses a path session reference directly", async () => {
+  await withTranscriptRoots(async (home, options) => {
+    const cwd = "/repo/.worktrees/gis-vst.12";
+    const transcript = join(home, "custom", "session.jsonl");
+    await mkdir(join(home, "custom"), { recursive: true });
+    await writeFile(transcript, "{}\n", "utf8");
+
+    assert.equal(await resolveAgentSessionTranscript({
+      source: "pi",
+      agent: "pi",
+      kind: "path",
+      value: transcript,
+    }, cwd, options), transcript);
   });
 });
 
