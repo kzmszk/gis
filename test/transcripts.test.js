@@ -55,6 +55,10 @@ test("resolves the newest Claude transcript and matching Codex session", async (
     await writeFile(codexMatch, JSON.stringify({ type: "session_meta", payload: { cwd } }) + "\n", "utf8");
 
     assert.deepEqual(await listClaudeTranscripts(cwd, options), [claudeNewest, claudeOld]);
+    assert.deepEqual(
+      await listClaudeTranscripts(cwd, { ...options, modifiedAfterMs: 1500 }),
+      [claudeNewest],
+    );
     assert.deepEqual(await listCodexTranscripts(cwd, options), [codexMatch]);
     assert.equal(await resolveTranscriptPath("claude", cwd, options), claudeNewest);
     assert.equal(await resolveTranscriptPath(cwd, "codex", options), codexMatch);

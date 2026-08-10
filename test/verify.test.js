@@ -27,7 +27,7 @@ function options(overrides = {}) {
     worktreePath: "/repo/.worktrees/gis-vst.8",
     runPath: "/repo/.worktrees/gis-vst.8/.gis/run",
     transcriptPath: "/home/kazu/.codex/sessions/session.jsonl",
-    config: { verify: "npm test", verify_max: 3 },
+    config: { verify: "npm test", verify_max: 3, verify_timeout: "15m" },
     beads: {
       async markBlocked(issueId, locations) {
         return {
@@ -61,7 +61,7 @@ test("returns after the first passing verify without prompting the pane", async 
 
   assert.equal(result.status, "verified");
   assert.equal(result.attempts, 1);
-  assert.deepEqual(calls, [["npm test", "/repo/.worktrees/gis-vst.8"]]);
+  assert.deepEqual(calls, [["npm test", "/repo/.worktrees/gis-vst.8", 900_000]]);
 });
 
 test("retries in the same pane and records verification feedback in the next round prompt", async () => {
@@ -93,7 +93,7 @@ test("retries in the same pane and records verification feedback in the next rou
 
     assert.equal(result.status, "verified");
     assert.equal(result.attempts, 2);
-    assert.deepEqual(verifies, [["npm test", root], ["npm test", root]]);
+    assert.deepEqual(verifies, [["npm test", root, 900_000], ["npm test", root, 900_000]]);
     assert.deepEqual(prompts, [{ target: bead.id, text: "Read .gis/run/prompt.md and execute it." }]);
     assert.deepEqual(waits, [true]);
     const prompt = await readFile(join(runPath, "prompt.md"), "utf8");
@@ -113,7 +113,7 @@ test("blocks exactly at verify_max without an extra retry and keeps all three ha
     const result = await runVerificationLoop(options({
       worktreePath: root,
       runPath,
-      config: { verify: "npm test", verify_max: 2 },
+      config: { verify: "npm test", verify_max: 2, verify_timeout: "15m" },
       runVerify: async (...args) => {
         verifies.push(args);
         return { passed: false, stderr: "still failing" };

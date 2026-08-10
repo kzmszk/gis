@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import type { ExecFileException } from "node:child_process";
 import { promisify } from "node:util";
 import type { Bead, BeadHandoffLocations } from "./beads.js";
+import { parseDurationMs } from "./config.js";
 import type { GitAdapterOptions } from "./recovery.js";
 import { GitCommandError } from "./recovery.js";
 import { runVerifyCommand, type VerifyCommandResult, type VerifyCommandRunner } from "./verify.js";
@@ -12,8 +13,12 @@ const execFileAsync = promisify(execFile);
 export interface MergeGitSource {
   /** Rebase the bead branch in its own worktree onto the configured base. */
   rebase(worktreePath: string, baseBranch: string): Promise<void>;
+  /** Return true only when the bead branch contains a commit ahead of base. */
+  hasCommits(worktreePath: string, baseBranch: string): Promise<boolean>;
   /** Fast-forward the checked-out base worktree with the rebased bead branch. */
   merge(repositoryPath: string, branch: string): Promise<void>;
+  /** Remove the integrated bead branch after its worktree has been removed. */
+  deleteBranch(repositoryPath: string, branch: string): Promise<void>;
 }
 
 export interface MergeBeadsSource {
@@ -33,12 +38,13 @@ export interface MergeQueueOptions {
   readonly repositoryPath: string;
   readonly baseBranch: string;
   readonly verifyCommand: string;
+  readonly verifyTimeout: string;
   readonly beads: MergeBeadsSource;
   readonly git?: MergeGitSource;
   readonly runVerify?: VerifyCommandRunner;
 }
 
-export type MergeFailurePhase = "rebase" | "verify" | "merge";
+export type MergeFailurePhase = "rebase" | "commit" | "verify" | "merge";
 
 export interface MergeBlockedResult {
   readonly status: "blocked";
@@ -51,7 +57,9 @@ export interface MergeBlockedResult {
 
 export interface MergeMergedResult {
   readonly status: "merged";
-  readonly bead: Bead;
+  readonly bead: Pick<Bead, "id">;
+  /** Main contains the commit, but closing the Beads issue failed. */
+  readonly stateError?: unknown;
   /** Main and bd are committed, but cleanup needs human/retry attention. */
   readonly cleanupError?: unknown;
 }
@@ -124,24 +132,46 @@ export class GitMergeAdapter implements MergeGitSource {
   rebase(worktreePath: string, baseBranch: string): Promise<void> {
     requireNonEmpty(worktreePath, "worktreePath");
     requireNonEmpty(baseBranch, "baseBranch");
-    return this.run(["-C", worktreePath, "rebase", baseBranch]);
+    return this.run(["-C", worktreePath, "rebase", baseBranch]).then(() => undefined);
+  }
+
+  async hasCommits(worktreePath: string, baseBranch: string): Promise<boolean> {
+    requireNonEmpty(worktreePath, "worktreePath");
+    requireNonEmpty(baseBranch, "baseBranch");
+    const stdout = await this.run([
+      "-C", worktreePath, "rev-list", "--count", `${baseBranch}..HEAD`,
+    ]);
+    const count = Number(stdout.trim());
+    if (!Number.isSafeInteger(count) || count < 0) {
+      throw new Error(`git rev-list returned an invalid count: ${stdout.trim()}`);
+    }
+    return count > 0;
   }
 
   merge(repositoryPath: string, branch: string): Promise<void> {
     requireNonEmpty(repositoryPath, "repositoryPath");
     requireNonEmpty(branch, "branch");
-    return this.run(["-C", repositoryPath, "merge", "--ff-only", branch]);
+    return this.run(["-C", repositoryPath, "merge", "--ff-only", branch])
+      .then(() => undefined);
   }
 
-  private async run(args: readonly string[]): Promise<void> {
+  deleteBranch(repositoryPath: string, branch: string): Promise<void> {
+    requireNonEmpty(repositoryPath, "repositoryPath");
+    requireNonEmpty(branch, "branch");
+    return this.run(["-C", repositoryPath, "branch", "-d", branch])
+      .then(() => undefined);
+  }
+
+  private async run(args: readonly string[]): Promise<string> {
     try {
-      await execFileAsync(this.command, [...args], {
+      const result = await execFileAsync(this.command, [...args], {
         cwd: this.cwd,
         env: this.env,
         timeout: this.timeoutMs,
         maxBuffer: this.maxBufferBytes,
         encoding: "utf8",
       });
+      return result.stdout;
     } catch (error: unknown) {
       if (error instanceof Error) {
         throw new GitCommandError(
@@ -168,6 +198,7 @@ export class SerialMergeQueue {
     requireNonEmpty(options.repositoryPath, "repositoryPath");
     requireNonEmpty(options.baseBranch, "baseBranch");
     requireNonEmpty(options.verifyCommand, "verifyCommand");
+    requireNonEmpty(options.verifyTimeout, "verifyTimeout");
     this.options = options;
     this.git = options.git ?? defaultGit();
     this.runVerify = options.runVerify ?? runVerifyCommand;
@@ -203,11 +234,25 @@ export class SerialMergeQueue {
       return this.blocked(item, handoff, "rebase", error);
     }
 
+    try {
+      if (!await this.git.hasCommits(item.worktree.path, this.options.baseBranch)) {
+        return this.blocked(
+          item,
+          handoff,
+          "commit",
+          new Error("bead branch has no commit ahead of base"),
+        );
+      }
+    } catch (error: unknown) {
+      return this.blocked(item, handoff, "commit", error);
+    }
+
     let verification: VerifyCommandResult;
     try {
       verification = await this.runVerify(
         this.options.verifyCommand,
         item.worktree.path,
+        parseDurationMs(this.options.verifyTimeout, "verify_timeout"),
       );
     } catch (error: unknown) {
       return this.blocked(item, handoff, "verify", error);
@@ -224,20 +269,31 @@ export class SerialMergeQueue {
 
     // These are intentionally after merge and never occur on a pre-merge
     // failure. Worktree removal is the final side effect of a successful bead.
-    const bead = await this.options.beads.markMerged(
-      item.bead.id,
-      "merged after rebase and verify",
-    );
-
+    let bead: Pick<Bead, "id">;
     try {
+      bead = await this.options.beads.markMerged(
+        item.bead.id,
+        "merged after rebase and verify",
+      );
+    } catch (stateError: unknown) {
+      // Git integration already succeeded. Retain the worktree and report the
+      // Beads write failure without ever moving the issue back to blocked.
+      return { status: "merged", bead: item.bead, stateError };
+    }
+
+    const cleanup = async (): Promise<void> => {
       await item.worktree.remove();
+      await this.git.deleteBranch(this.options.repositoryPath, item.bead.id);
+    };
+    try {
+      await cleanup();
       return { status: "merged", bead };
     } catch (firstError: unknown) {
       // A cleanup call can fail after git and bd have already committed the
       // bead. Retrying is safe because worktree removal is idempotent; most
       // importantly, never turn an already-closed bead back into blocked.
       try {
-        await item.worktree.remove();
+        await cleanup();
         return { status: "merged", bead };
       } catch (secondError: unknown) {
         return { status: "merged", bead, cleanupError: secondError ?? firstError };
@@ -252,11 +308,16 @@ export class SerialMergeQueue {
     error: unknown,
     verification?: VerifyCommandResult,
   ): Promise<MergeBlockedResult> {
-    return this.options.beads.markBlocked(item.bead.id, handoff).then((bead) => ({
+    const detailedHandoff = {
+      ...handoff,
+      failurePhase: phase,
+      failureDetail: error instanceof Error ? error.message : String(error),
+    };
+    return this.options.beads.markBlocked(item.bead.id, detailedHandoff).then((bead) => ({
       status: "blocked",
       phase,
       bead,
-      handoff,
+      handoff: detailedHandoff,
       verification,
       error,
     }));

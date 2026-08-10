@@ -28,6 +28,8 @@ export interface GisConfig {
   readonly verify_max: number;
   readonly review_max: number;
   readonly blocked_timeout: string;
+  readonly worker_timeout: string;
+  readonly verify_timeout: string;
   readonly claude_permission_mode: ClaudePermissionMode;
   readonly profiles: ProfileConfig;
 }
@@ -65,6 +67,8 @@ export const DEFAULT_CONFIG: GisConfig = {
   verify_max: 5,
   review_max: 3,
   blocked_timeout: "15m",
+  worker_timeout: "1h",
+  verify_timeout: "15m",
   claude_permission_mode: "auto",
   profiles: DEFAULT_PROFILES,
 };
@@ -78,6 +82,8 @@ const TOP_LEVEL_KEYS = new Set([
   "verify_max",
   "review_max",
   "blocked_timeout",
+  "worker_timeout",
+  "verify_timeout",
   "claude_permission_mode",
   "profiles",
 ]);
@@ -142,6 +148,37 @@ function asBlockedTimeout(value: unknown): string {
     );
   }
   return timeout;
+}
+
+function asTimeout(value: unknown, path: string): string {
+  const timeout = asString(value, path);
+  if (!/^(?:[1-9]\d*)(?:ms|s|m|h|d)$/.test(timeout)) {
+    throw new ConfigError(
+      `${path} must be a positive duration such as 500ms, 15s, 15m, or 1h`,
+    );
+  }
+  return timeout;
+}
+
+const DURATION_MULTIPLIERS: Readonly<Record<string, number>> = {
+  ms: 1,
+  s: 1_000,
+  m: 60_000,
+  h: 3_600_000,
+  d: 86_400_000,
+};
+
+/** Convert a validated gis duration to milliseconds for subprocess/API timeouts. */
+export function parseDurationMs(value: string, name: string): number {
+  const match = /^([1-9]\d*)(ms|s|m|h|d)$/.exec(value);
+  if (match === null) {
+    throw new RangeError(`${name} must be a positive duration`);
+  }
+  const milliseconds = Number(match[1]) * DURATION_MULTIPLIERS[match[2]];
+  if (!Number.isSafeInteger(milliseconds) || milliseconds <= 0) {
+    throw new RangeError(`${name} is too large`);
+  }
+  return milliseconds;
 }
 
 function asPermissionMode(value: unknown): ClaudePermissionMode {
@@ -229,6 +266,12 @@ export function parseConfig(contents: string): GisConfig {
     blocked_timeout: source.blocked_timeout === undefined
       ? DEFAULT_CONFIG.blocked_timeout
       : asBlockedTimeout(source.blocked_timeout),
+    worker_timeout: source.worker_timeout === undefined
+      ? DEFAULT_CONFIG.worker_timeout
+      : asTimeout(source.worker_timeout, "worker_timeout"),
+    verify_timeout: source.verify_timeout === undefined
+      ? DEFAULT_CONFIG.verify_timeout
+      : asTimeout(source.verify_timeout, "verify_timeout"),
     claude_permission_mode: source.claude_permission_mode === undefined
       ? DEFAULT_CONFIG.claude_permission_mode
       : asPermissionMode(source.claude_permission_mode),

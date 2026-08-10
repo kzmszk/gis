@@ -33,7 +33,7 @@ const snapshot = ({ workspaces = [], panes = [] } = {}) => ({
   },
 });
 
-test("reopens an in-progress bead when its worktree has no live pane", async () => {
+test("blocks an in-progress bead when its retained worktree has no live pane", async () => {
   const updates = [];
   const result = await reconcileStartup({
     cwd: "/repo",
@@ -42,6 +42,10 @@ test("reopens an in-progress bead when its worktree has no live pane", async () 
       update: async (id, update) => {
         updates.push({ id, update });
         return bead(id, update.status);
+      },
+      markBlocked: async (id, locations) => {
+        updates.push({ id, locations });
+        return bead(id, "blocked");
       },
     },
     herdr: { apiSnapshot: async () => snapshot() },
@@ -56,8 +60,11 @@ test("reopens an in-progress bead when its worktree has no live pane", async () 
     },
   });
 
-  assert.deepEqual(result.reopenedIssueIds, ["gis-vst.14"]);
-  assert.deepEqual(updates, [{ id: "gis-vst.14", update: { status: "open" } }]);
+  assert.deepEqual(result.reopenedIssueIds, []);
+  assert.deepEqual(result.blockedIssueIds, ["gis-vst.14"]);
+  assert.equal(updates[0].id, "gis-vst.14");
+  assert.equal(updates[0].locations.worktreePath, "/repo/.worktrees/gis-vst.14");
+  assert.equal(updates[0].locations.failurePhase, "startup recovery");
   assert.deepEqual(result.orphanedWorktrees, []);
 });
 
@@ -273,7 +280,10 @@ branch refs/heads/gis-vst.14
       .trim()
       .split("\n")
       .map((line) => JSON.parse(line));
-    assert.deepEqual(requests, [["update", "gis-vst.14", "--status=open", "--json"]]);
+    assert.equal(requests[0][0], "update");
+    assert.equal(requests[0][1], "gis-vst.14");
+    assert.equal(requests[0][2], "--status=blocked");
+    assert.match(requests[0][3], /--append-notes=.*failure phase: startup recovery/s);
   } finally {
     server.close();
     await once(server, "close");

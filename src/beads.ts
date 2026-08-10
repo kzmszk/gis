@@ -43,6 +43,8 @@ export interface BeadHandoffLocations {
   readonly worktreePath: string;
   readonly roundLogPath: string;
   readonly transcriptPath: string;
+  readonly failurePhase?: string;
+  readonly failureDetail?: string;
 }
 
 /** The context gis records on a gate created from a worker escalation. */
@@ -137,6 +139,8 @@ export function formatBlockedNotes(locations: BeadHandoffLocations): string {
     `worktree: ${locations.worktreePath}`,
     `rounds: ${locations.roundLogPath}`,
     `transcript: ${locations.transcriptPath}`,
+    ...(locations.failurePhase === undefined ? [] : [`failure phase: ${locations.failurePhase}`]),
+    ...(locations.failureDetail === undefined ? [] : [`failure detail: ${locations.failureDetail}`]),
   ].join("\n");
 }
 
@@ -297,7 +301,7 @@ export class BeadsAdapter {
       args.push(`--assignee=${update.assignee}`);
     } else if (update.status === "blocked") {
       requireNonEmpty(update.notes, "notes");
-      args.push(`--notes=${update.notes}`);
+      args.push(`--append-notes=${update.notes}`);
     }
     args.push("--json");
     return this.runJson(args).then((stdout) => parseSingleBead(stdout, "bd update"));

@@ -14,6 +14,7 @@ const handoff = {
   roundLogPath: "/repo/.worktrees/gis-vst.9/.gis/run",
   transcriptPath: "/home/kazu/.codex/sessions/session.jsonl",
   blockedTimeout: "500ms",
+  workerTimeout: "1h",
 };
 
 const blockedResult = {
@@ -71,7 +72,7 @@ test("keeps the blocked pane available while a human resumes it", async () => {
   assert.equal(notifications.length, 1);
   assert.equal(marked.length, 0);
   assert.deepEqual(waits, [
-    { target: handoff.target, options: { until: ["done", "blocked"] } },
+    { target: handoff.target, options: { until: ["done", "blocked"], timeoutMs: 3_600_000 } },
     { target: handoff.target, options: { until: ["done"], timeoutMs: 500 } },
   ]);
 });
@@ -109,6 +110,7 @@ test("marks the bead blocked after the human wait times out and keeps handoff pa
       worktreePath: handoff.worktreePath,
       roundLogPath: handoff.roundLogPath,
       transcriptPath: handoff.transcriptPath,
+      failurePhase: "blocked timeout",
     },
   }]);
   assert.deepEqual(waits[1], {
@@ -143,4 +145,28 @@ test("does not turn unrelated herdr failures into blocked beads", async () => {
     /socket disconnected/,
   );
   assert.deepEqual(marked, []);
+});
+
+test("times out a worker that never reports done or blocked", async () => {
+  const marked = [];
+  const result = await waitForAgentWithBlockedHandling({
+    ...handoff,
+    workerTimeout: "5ms",
+    herdr: {
+      async agentWait(_target, options) {
+        assert.equal(options.timeoutMs, 5);
+        throw new HerdrApiError("timeout", "agent wait timed out");
+      },
+    },
+    beads: {
+      async markBlocked(issueId, locations) {
+        marked.push({ issueId, locations });
+        return { id: issueId, title: "blocked", description: "", status: "blocked", priority: 2, issue_type: "task" };
+      },
+    },
+  });
+
+  assert.equal(result.status, "blocked");
+  assert.equal(result.wasBlocked, false);
+  assert.equal(marked[0].locations.failurePhase, "worker timeout");
 });

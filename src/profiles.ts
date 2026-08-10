@@ -14,6 +14,8 @@ export interface CandidateSelectionOptions {
   readonly availableKinds?: readonly string[] | ReadonlySet<string>;
   /** Kinds that must not be selected, for example the implementation kind during review. */
   readonly excludeKinds?: readonly string[] | ReadonlySet<string>;
+  /** Return false to stop fallback and surface this startup error immediately. */
+  readonly shouldFallback?: (error: unknown) => boolean;
 }
 
 export interface ProfileStartResult<T> {
@@ -196,6 +198,9 @@ export async function startWithProfileFallback<T>(
       const result = await start(candidate, buildAgentStartArgs(candidate, config));
       return { profile, candidate, result, attempts };
     } catch (error: unknown) {
+      if (options.shouldFallback !== undefined && !options.shouldFallback(error)) {
+        throw error;
+      }
       hasError = true;
       lastError = error;
     }

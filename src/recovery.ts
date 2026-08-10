@@ -1,8 +1,8 @@
 import { execFile } from "node:child_process";
 import type { ExecFileException } from "node:child_process";
 import { promisify } from "node:util";
-import { resolve } from "node:path";
-import type { Bead } from "./beads.js";
+import { join, resolve } from "node:path";
+import type { Bead, BeadHandoffLocations } from "./beads.js";
 import { createBeadsAdapter } from "./beads.js";
 import type {
   SessionSnapshot,
@@ -172,6 +172,7 @@ export function createGitAdapter(options?: GitAdapterOptions | string): GitAdapt
 interface BeadsRecoverySource {
   listInProgress(): Promise<readonly Bead[]>;
   update(issueId: string, update: { readonly status: "open" }): Promise<Bead>;
+  markBlocked(issueId: string, locations: BeadHandoffLocations): Promise<Bead>;
 }
 
 interface HerdrRecoverySource {
@@ -189,6 +190,7 @@ export interface OrphanedWorktree {
 
 export interface StartupReconciliationReport {
   readonly reopenedIssueIds: readonly string[];
+  readonly blockedIssueIds: readonly string[];
   readonly orphanedWorktrees: readonly OrphanedWorktree[];
 }
 
@@ -263,11 +265,29 @@ export async function reconcileStartup(
   }));
   const inProgressIds = new Set(inProgress.map((bead) => bead.id));
   const reopenedIssueIds: string[] = [];
+  const blockedIssueIds: string[] = [];
 
   for (const bead of inProgress) {
     const hasLivePane = normalizedWorktrees.some(({ worktree, path }) =>
       worktree.branch === bead.id && livePaths.has(path));
     if (hasLivePane) {
+      continue;
+    }
+
+    const retained = normalizedWorktrees.find(({ worktree }) => worktree.branch === bead.id);
+    if (retained !== undefined) {
+      const runPath = join(retained.path, ".gis", "run");
+      await beads.markBlocked(bead.id, {
+        worktreePath: retained.path,
+        roundLogPath: runPath,
+        transcriptPath: join(runPath, "transcript-recovery.unresolved"),
+        failurePhase: "startup recovery",
+        failureDetail: "worktree exists but no live herdr pane was found",
+      });
+      blockedIssueIds.push(bead.id);
+      report(
+        `retained worktree ${retained.path} for ${bead.id} has no live pane; marked blocked`,
+      );
       continue;
     }
 
@@ -292,7 +312,7 @@ export async function reconcileStartup(
     );
   }
 
-  return { reopenedIssueIds, orphanedWorktrees };
+  return { reopenedIssueIds, blockedIssueIds, orphanedWorktrees };
 }
 
 export const reconcileRecovery = reconcileStartup;

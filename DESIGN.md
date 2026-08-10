@@ -130,9 +130,10 @@ bd ready --exclude-label human
       ※ この中の verify 失敗は verify カウンタを消費しない
 
   [マージ] 直列キューに投入
-      1本ずつ main に rebase → verify を再実行 → 通れば merge
+      1本ずつ main に rebase → base より先の commit があることを確認
+      → verify を再実行 → 通れば merge
 
-  成功         → bd close → worktree と pane を破棄
+  成功         → bd close → worktree と pane を破棄 → 統合済み bead branch を削除
   上限超過/blocked → bd を blocked にし、worktree と pane は保持したまま人間へ通知
 ```
 
@@ -167,6 +168,8 @@ verify は無料（数十秒の CPU）、レビューは有料（サブスク枠
 
 個別に通ったブランチ同士が合流すると壊れる、というのが並列開発の主要な失敗モードである。
 これは**捨ててはいけない複雑さ**（Gas Town の Refinery が存在する理由もここ）。
+ワーカーには変更を commit してから完了報告するよう指示し、マージキューでも
+`base..HEAD` が空でないことを検証する。変更ゼロのブランチを成功扱いして bead を close しない。
 
 ---
 
@@ -287,6 +290,8 @@ Claude と ChatGPT のサブスク枠は別建てなので実質的に分離さ�
 - herdr で通知し、**ペインはそのまま残す**。人間がアタッチして手で解く
 - **定型返答の自動投入は絶対にしない。** 承認プロンプトに自動で yes を返す仕組みは、事故が起きたときに誰も止められない
 - `blocked_timeout` 経過後も blocked なら撤退し、bead を `blocked` にする
+- done / blocked のどちらも返さないワーカーは `worker_timeout` で打ち切り、worktree を保持して blocked にする
+- verify コマンドは `verify_timeout` で打ち切る。ハングした検証を無期限に待たない
 
 ### worktree は成功時にしか破棄しない
 
@@ -335,7 +340,8 @@ herdr api snapshot  ×  git worktree list  ×  bd list --status=in_progress
 
 | 状態 | 対応 |
 |---|---|
-| in_progress だがペインが無い | bead を open に戻す |
+| in_progress だがペインも worktree も無い | bead を open に戻す |
+| in_progress で worktree は残るがペインが無い | 実在する worktree パスを記録して bead を blocked にする |
 | ペインはあるが対応する bead が無い | 人間に報告して放置 |
 
 揮発的状態を永続していないため、単純な集合演算で済む。
@@ -411,6 +417,8 @@ mol / formula を捨てたので素の依存関係で足りる。
 N 件マージ / M 件 blocked / K 件が人間の確認待ち
 ```
 
+`K` は今回作成したものに限らず、リポジトリ内に残っている open な human bead の総数。
+
 一回の実行が一つの完結した単位になり、**なぜ止まったかが必ず提示される**。
 ready があるうちは走り続けるので、依存グラフは自動的に前進する
 （`bd close` した瞬間に依存先のブロックが外れ、次のループで拾われる）。
@@ -432,6 +440,8 @@ review = false                   # 段階2で true
 verify_max = 5
 review_max = 3
 blocked_timeout = "15m"
+worker_timeout = "1h"
+verify_timeout = "15m"
 claude_permission_mode = "auto"  # 使えなければ "acceptEdits"
 
 # --- モデルプロファイル（第5章）: 順序付き候補リスト、先頭優先 ---

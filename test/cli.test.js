@@ -7,8 +7,20 @@ import { delimiter, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { test } from "node:test";
 import { promisify } from "node:util";
+import { pathToFileURL } from "node:url";
 
 const execFileAsync = promisify(execFile);
+
+test("importing the CLI module does not execute gis run", async () => {
+  const moduleUrl = pathToFileURL(resolve("dist/cli.js")).href;
+  const result = await execFileAsync(process.execPath, [
+    "--input-type=module",
+    "--eval",
+    `await import(${JSON.stringify(moduleUrl)})`,
+  ]);
+  assert.equal(result.stdout, "");
+  assert.equal(result.stderr, "");
+});
 
 const bead = {
   id: "gis-vst.cli",
@@ -55,6 +67,8 @@ const args = process.argv.slice(2);
 await appendFile(process.env.GIS_GIT_LOG, JSON.stringify(args) + "\\n");
 if (args[0] === "worktree" && args[1] === "list") {
   process.stdout.write("worktree " + process.env.GIS_BASE_PATH + "\\nHEAD base\\nbranch refs/heads/main\\n");
+} else if (args.includes("rev-list")) {
+  process.stdout.write("1\\n");
 }
 `, "utf8");
   await chmod(join(bin, "bd"), 0o755);
@@ -203,7 +217,9 @@ test("gis run connects default bd, herdr, and git adapters through merge cleanup
       [
         ["worktree", "list", "--porcelain"],
         ["-C", worktreePath, "rebase", "main"],
+        ["-C", worktreePath, "rev-list", "--count", "main..HEAD"],
         ["-C", baseCwd, "merge", "--ff-only", bead.id],
+        ["-C", baseCwd, "branch", "-d", bead.id],
       ],
     );
   } finally {

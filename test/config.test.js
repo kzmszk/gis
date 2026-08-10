@@ -38,6 +38,8 @@ review = false
 verify_max = 4
 review_max = 2
 blocked_timeout = "500ms"
+worker_timeout = "2h"
+verify_timeout = "30m"
 claude_permission_mode = "acceptEdits"
 
 [[profiles.implement]]
@@ -58,6 +60,8 @@ effort = "max"
   assert.equal(config.verify_max, 4);
   assert.equal(config.review_max, 2);
   assert.equal(config.blocked_timeout, "500ms");
+  assert.equal(config.worker_timeout, "2h");
+  assert.equal(config.verify_timeout, "30m");
   assert.equal(config.claude_permission_mode, "acceptEdits");
   assert.deepEqual(config.profiles.implement, [
     { kind: "custom-agent", model: "future-model-that-is-not-known-to-gis", effort: "high" },
@@ -71,6 +75,8 @@ test("rejects malformed TOML and invalid settings", () => {
     "concurrency = 0",
     "review = \"true\"",
     "blocked_timeout = \"soon\"",
+    "worker_timeout = \"soon\"",
+    "verify_timeout = \"soon\"",
     "unknown_setting = true",
     "[[profiles.implement]]\nkind = \"codex\"\nmodel = 42\neffort = \"high\"",
     "[[profiles.implement]]\nkind = \"codex\"\nmodel = \"gpt\"\neffort = \"fast\"",

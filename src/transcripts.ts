@@ -15,6 +15,8 @@ export interface TranscriptResolverOptions {
   readonly codexSessionsDir?: string;
   /** Number of JSONL records to inspect for Codex session metadata. */
   readonly maxCodexMetadataLines?: number;
+  /** Ignore transcripts last modified before this worker started. */
+  readonly modifiedAfterMs?: number;
 }
 
 export interface TranscriptIndex {
@@ -145,6 +147,20 @@ async function timestampedFiles(paths: readonly string[]): Promise<TimestampedPa
   return files;
 }
 
+function afterCutoff(
+  files: readonly TimestampedPath[],
+  options: TranscriptResolverOptions,
+): TimestampedPath[] {
+  const cutoff = options.modifiedAfterMs;
+  if (cutoff === undefined) {
+    return [...files];
+  }
+  if (!Number.isFinite(cutoff) || cutoff < 0) {
+    throw new RangeError("modifiedAfterMs must be a non-negative finite number");
+  }
+  return files.filter(({ mtimeMs }) => mtimeMs >= cutoff);
+}
+
 function newestFirst(files: readonly TimestampedPath[]): string[] {
   return [...files]
     .sort((left, right) => right.mtimeMs - left.mtimeMs || left.path.localeCompare(right.path))
@@ -157,7 +173,10 @@ export async function listClaudeTranscripts(
   options: TranscriptResolverOptions = {},
 ): Promise<string[]> {
   const directory = claudeProjectDirectory(cwd, options);
-  return newestFirst(await timestampedFiles(await jsonlFiles(directory, false)));
+  return newestFirst(afterCutoff(
+    await timestampedFiles(await jsonlFiles(directory, false)),
+    options,
+  ));
 }
 
 /** Resolve the newest Claude JSONL transcript for a cwd. */
@@ -214,7 +233,10 @@ async function matchingCodexFiles(
 ): Promise<string[]> {
   const expectedCwd = absoluteCwd(cwd);
   const maxLines = metadataLineLimit(options);
-  const candidates = await jsonlFiles(codexSessionsDirectory(options), true);
+  const candidates = newestFirst(afterCutoff(
+    await timestampedFiles(await jsonlFiles(codexSessionsDirectory(options), true)),
+    options,
+  ));
   const matches: string[] = [];
 
   for (const candidate of candidates) {

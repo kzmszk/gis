@@ -2,7 +2,7 @@ import { exec } from "node:child_process";
 import type { ExecException } from "node:child_process";
 import { promisify } from "node:util";
 import type { Bead, BeadHandoffLocations } from "./beads.js";
-import type { GisConfig } from "./config.js";
+import { parseDurationMs, type GisConfig } from "./config.js";
 import { promptWorker, type WorkerPromptSource } from "./worker.js";
 
 const execAsync = promisify(exec);
@@ -19,6 +19,7 @@ export interface VerifyCommandResult {
 export type VerifyCommandRunner = (
   command: string,
   cwd: string,
+  timeoutMs?: number,
 ) => Promise<VerifyCommandResult>;
 
 export interface VerifyLoopBeadsSource {
@@ -30,7 +31,7 @@ export interface VerifyLoopOptions {
   readonly worktreePath: string;
   readonly runPath: string;
   readonly transcriptPath: string;
-  readonly config: Pick<GisConfig, "verify" | "verify_max">;
+  readonly config: Pick<GisConfig, "verify" | "verify_max" | "verify_timeout">;
   readonly beads: VerifyLoopBeadsSource;
   /** Herdr target for the implementation pane; defaults to the bead ID. */
   readonly target?: string;
@@ -79,7 +80,11 @@ function exitCode(error: ExecException & { code?: string | number }): number | u
 }
 
 /** Execute the configured shell command in the bead's worktree. */
-export async function runVerifyCommand(command: string, cwd: string): Promise<VerifyCommandResult> {
+export async function runVerifyCommand(
+  command: string,
+  cwd: string,
+  timeoutMs?: number,
+): Promise<VerifyCommandResult> {
   requireNonEmpty(command, "verifyCommand");
   requireNonEmpty(cwd, "cwd");
 
@@ -88,6 +93,7 @@ export async function runVerifyCommand(command: string, cwd: string): Promise<Ve
       cwd,
       encoding: "utf8",
       maxBuffer: VERIFY_MAX_BUFFER,
+      timeout: timeoutMs,
     });
     return {
       passed: true,
@@ -160,7 +166,11 @@ export async function runVerificationLoop(
   const runVerify = options.runVerify ?? runVerifyCommand;
 
   for (let attempt = 1; attempt <= options.config.verify_max; attempt += 1) {
-    const result = await runVerify(options.config.verify, options.worktreePath);
+    const result = await runVerify(
+      options.config.verify,
+      options.worktreePath,
+      parseDurationMs(options.config.verify_timeout, "verify_timeout"),
+    );
     if (result.passed) {
       return { status: "verified", attempts: attempt, result };
     }

@@ -6,6 +6,8 @@ review = false
 verify_max = 5
 review_max = 3
 blocked_timeout = "15m"
+worker_timeout = "1h"
+verify_timeout = "15m"
 claude_permission_mode = "auto"
 
 [[profiles.plan]]

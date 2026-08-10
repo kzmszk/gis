@@ -1,4 +1,5 @@
 import type { Bead, BeadHandoffLocations } from "./beads.js";
+import { parseDurationMs } from "./config.js";
 import { HerdrProtocolError } from "./herdr.js";
 import type { AgentStatus, AgentWaitOptions, AgentWaitResult } from "./herdr.js";
 
@@ -20,6 +21,10 @@ export interface BlockedHandlingOptions {
   readonly transcriptPath: string;
   /** Duration for which a human may resume a blocked worker. */
   readonly blockedTimeout: string;
+  /** Maximum duration before a worker that emits no terminal state is escalated. */
+  readonly workerTimeout: string;
+  /** Resolve the transcript only when a handoff is actually required. */
+  readonly resolveTranscriptPath?: () => Promise<string>;
   readonly herdr: BlockedHerdrSource;
   readonly beads: BlockedBeadsSource;
   /** Called as soon as a blocked event is observed. */
@@ -36,33 +41,9 @@ export interface AgentWaitHandlingResult {
   readonly bead?: Bead;
 }
 
-const DURATION_PATTERN = /^(?<amount>[1-9]\d*)(?<unit>ms|s|m|h|d)$/;
-const DURATION_MULTIPLIERS: Readonly<Record<string, number>> = {
-  ms: 1,
-  s: 1_000,
-  m: 60_000,
-  h: 3_600_000,
-  d: 86_400_000,
-};
-
 /** Convert the config duration syntax into milliseconds for herdr. */
 export function parseBlockedTimeout(value: string): number {
-  if (typeof value !== "string" || value.trim().length === 0) {
-    throw new TypeError("blockedTimeout must be a non-empty duration");
-  }
-
-  const match = DURATION_PATTERN.exec(value);
-  if (match === null) {
-    throw new RangeError("blockedTimeout must be a positive duration such as 500ms, 15s, 15m, or 1h");
-  }
-
-  const amount = Number(match.groups?.amount);
-  const multiplier = DURATION_MULTIPLIERS[match.groups?.unit ?? ""];
-  const milliseconds = amount * multiplier;
-  if (!Number.isSafeInteger(milliseconds) || milliseconds <= 0) {
-    throw new RangeError("blockedTimeout is too large");
-  }
-  return milliseconds;
+  return parseDurationMs(value, "blockedTimeout");
 }
 
 export function formatBlockedNotification(options: Pick<
@@ -98,16 +79,21 @@ function isTimeoutError(error: unknown): boolean {
 
 async function markBlocked(
   options: BlockedHandlingOptions,
+  wasBlocked: boolean,
 ): Promise<AgentWaitHandlingResult> {
+  const transcriptPath = options.resolveTranscriptPath === undefined
+    ? options.transcriptPath
+    : await options.resolveTranscriptPath();
   const locations: BeadHandoffLocations = {
     worktreePath: options.worktreePath,
     roundLogPath: options.roundLogPath,
-    transcriptPath: options.transcriptPath,
+    transcriptPath,
+    failurePhase: wasBlocked ? "blocked timeout" : "worker timeout",
   };
   const bead = await options.beads.markBlocked(options.beadId, locations);
   return {
     status: "blocked",
-    wasBlocked: true,
+    wasBlocked,
     worktreeRetained: true,
     bead,
   };
@@ -123,9 +109,18 @@ async function markBlocked(
 export async function waitForAgentWithBlockedHandling(
   options: BlockedHandlingOptions,
 ): Promise<AgentWaitHandlingResult> {
-  const initial = await options.herdr.agentWait(options.target, {
-    until: ["done", "blocked"],
-  });
+  let initial: AgentWaitResult;
+  try {
+    initial = await options.herdr.agentWait(options.target, {
+      until: ["done", "blocked"],
+      timeoutMs: parseDurationMs(options.workerTimeout, "workerTimeout"),
+    });
+  } catch (error: unknown) {
+    if (!isTimeoutError(error)) {
+      throw error;
+    }
+    return markBlocked(options, false);
+  }
   const initialStatus = statusFromWait(initial);
 
   if (initialStatus === "done") {
@@ -149,11 +144,11 @@ export async function waitForAgentWithBlockedHandling(
     // A compliant herdr endpoint should return a timeout error because this
     // wait excludes blocked. Treat an explicit blocked result as still blocked
     // rather than ever sending an automatic response.
-    return markBlocked(options);
+    return markBlocked(options, true);
   } catch (error: unknown) {
     if (!isTimeoutError(error)) {
       throw error;
     }
-    return markBlocked(options);
+    return markBlocked(options, true);
   }
 }

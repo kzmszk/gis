@@ -30,6 +30,7 @@ test("writes the detailed worker instructions and result protocol to prompt.md",
     assert.match(prompt.content, /npm test && npm run lint/);
     assert.match(prompt.content, /\.gis\/run\/round-2-impl\.json/);
     assert.match(prompt.content, /status.*done.*failed/s);
+    assert.match(prompt.content, /Commit all intended implementation changes/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

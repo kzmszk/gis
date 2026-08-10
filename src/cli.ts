@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { loadConfig } from "./config.js";
 import { reconcileStartup } from "./recovery.js";
 import { runForegroundLoop, type RunSummary } from "./run.js";
@@ -19,8 +21,13 @@ export async function main(args: string[]): Promise<RunSummary> {
   return runForegroundLoop({ cwd, config });
 }
 
-main(process.argv.slice(2)).catch((error: unknown) => {
-  const message = error instanceof Error ? error.message : String(error);
-  console.error(`gis: ${message}`);
-  process.exitCode = 1;
-});
+const isEntryPoint = process.argv[1] !== undefined &&
+  import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
+
+if (isEntryPoint) {
+  main(process.argv.slice(2)).catch((error: unknown) => {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`gis: ${message}`);
+    process.exitCode = 1;
+  });
+}

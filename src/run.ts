@@ -9,7 +9,7 @@ import {
   type MergeQueueItem,
   type MergeResult,
 } from "./merge.js";
-import { resolveProfileName } from "./profiles.js";
+import { startWithProfileFallback } from "./profiles.js";
 import { readWorkerResult, type ResultFileState } from "./result.js";
 import { resolveTranscriptPath, type TranscriptKind } from "./transcripts.js";
 import {
@@ -84,6 +84,7 @@ export interface RunOptions {
   readonly resolveTranscript?: (
     kind: TranscriptKind,
     worktreePath: string,
+    options?: { readonly modifiedAfterMs?: number },
   ) => Promise<string | undefined>;
   readonly report?: (message: string) => void;
 }
@@ -146,12 +147,17 @@ function summaryText(merged: number, blocked: number, humanWaiting: number): str
 async function resolveKnownTranscript(
   kind: string,
   worktreePath: string,
-  resolver: (kind: TranscriptKind, worktreePath: string) => Promise<string | undefined>,
+  resolver: (
+    kind: TranscriptKind,
+    worktreePath: string,
+    options?: { readonly modifiedAfterMs?: number },
+  ) => Promise<string | undefined>,
+  modifiedAfterMs?: number,
 ): Promise<string | undefined> {
   if (kind !== "claude" && kind !== "codex") {
     return undefined;
   }
-  return resolver(kind, worktreePath);
+  return resolver(kind, worktreePath, { modifiedAfterMs });
 }
 
 export function formatRunSummary(summary: Omit<RunSummary, "text">): string {
@@ -200,6 +206,7 @@ export async function runForegroundLoop(options: RunOptions = {}): Promise<RunSu
     repositoryPath: cwd,
     baseBranch: config.base,
     verifyCommand: config.verify,
+    verifyTimeout: config.verify_timeout,
     beads,
   });
   const resolveTranscript = options.resolveTranscript ?? resolveTranscriptPath;
@@ -230,20 +237,16 @@ export async function runForegroundLoop(options: RunOptions = {}): Promise<RunSu
 
     let started: StartedWorker | undefined;
     let workerKind: string | undefined;
+    const workerStartedAfterMs = Date.now() - 5_000;
 
     try {
-      const profile = resolveProfileName(bead);
-      const candidates = config.profiles[profile]
-        .filter((candidate) => config.kinds.includes(candidate.kind));
-      if (candidates.length === 0) {
-        throw new Error(`no available worker candidate for ${bead.id}`);
-      }
-
-      let lastError: unknown;
-      for (const candidate of candidates) {
-        await beads.dispatch(bead.id, candidate.kind);
-        try {
-          started = await workers.start({
+      const selection = await startWithProfileFallback(
+        bead,
+        config,
+        async (candidate) => {
+          workerKind = candidate.kind;
+          await beads.dispatch(bead.id, candidate.kind);
+          return workers.start({
             bead,
             runPath: worktree.runPath,
             verifyCommand: config.verify,
@@ -252,41 +255,43 @@ export async function runForegroundLoop(options: RunOptions = {}): Promise<RunSu
             config,
             herdr: undefined,
           });
-          workerKind = candidate.kind;
-          break;
-        } catch (error: unknown) {
-          if (!(error instanceof WorkerStartupError) || error.phase !== "start") {
-            // agentStart may already have created a live process before the
-            // prompt failed; retain this candidate for transcript lookup.
-            workerKind = candidate.kind;
-            throw error;
-          }
-          lastError = error;
-        }
-      }
-      if (started === undefined) {
-        throw lastError instanceof Error
-          ? lastError
-          : new Error(`all worker candidates failed to start for ${bead.id}`);
-      }
+        },
+        {
+          shouldFallback: (error) =>
+            error instanceof WorkerStartupError && error.phase === "start",
+        },
+      );
+      started = selection.result;
+      workerKind = selection.candidate.kind;
     } catch (error: unknown) {
       const transcriptPath = defaultTranscriptPath(workerKind ?? "unknown", worktree.path);
       await beads.markBlocked(bead.id, handoff(worktree, transcriptPath));
       return { status: "blocked" };
     }
 
-    const transcriptPath = await resolveKnownTranscript(
-      workerKind!,
-      worktree.path,
-      resolveTranscript,
-    ) ?? defaultTranscriptPath(workerKind!, worktree.path);
+    const currentTranscriptPath = async (): Promise<string> => {
+      try {
+        return await resolveKnownTranscript(
+          workerKind!,
+          worktree.path,
+          resolveTranscript,
+          workerStartedAfterMs,
+        ) ?? defaultTranscriptPath(workerKind!, worktree.path);
+      } catch {
+        return defaultTranscriptPath(workerKind!, worktree.path);
+      }
+    };
+    const currentHandoff = async (): Promise<BeadHandoffLocations> =>
+      handoff(worktree, await currentTranscriptPath());
     const waitOptions = {
       beadId: bead.id,
       target: bead.id,
       worktreePath: worktree.path,
       roundLogPath: worktree.runPath,
-      transcriptPath,
+      transcriptPath: defaultTranscriptPath(workerKind!, worktree.path),
+      resolveTranscriptPath: currentTranscriptPath,
       blockedTimeout: config.blocked_timeout,
+      workerTimeout: config.worker_timeout,
       herdr,
       beads,
     };
@@ -295,7 +300,7 @@ export async function runForegroundLoop(options: RunOptions = {}): Promise<RunSu
     try {
       waitResult = await blocked.wait(waitOptions);
     } catch (error: unknown) {
-      await beads.markBlocked(bead.id, handoff(worktree, transcriptPath));
+      await beads.markBlocked(bead.id, await currentHandoff());
       return { status: "blocked" };
     }
     if (waitResult.status === "blocked") {
@@ -306,12 +311,12 @@ export async function runForegroundLoop(options: RunOptions = {}): Promise<RunSu
     try {
       result = await readWorkerResult(started.prompt.resultPath);
     } catch (error: unknown) {
-      await beads.markBlocked(bead.id, handoff(worktree, transcriptPath));
+      await beads.markBlocked(bead.id, await currentHandoff());
       return { status: "blocked" };
     }
 
     if (result.kind === "needs_human") {
-      const locations = handoff(worktree, transcriptPath);
+      const locations = await currentHandoff();
       await beads.markBlocked(bead.id, locations);
       try {
         const gate = await beads.createHumanGate({
@@ -326,11 +331,12 @@ export async function runForegroundLoop(options: RunOptions = {}): Promise<RunSu
       }
     }
     if (result.kind !== "success") {
-      await beads.markBlocked(bead.id, handoff(worktree, transcriptPath));
+      await beads.markBlocked(bead.id, await currentHandoff());
       return { status: "blocked" };
     }
 
     try {
+      const transcriptPath = await currentTranscriptPath();
       const verification = await verify.verify({
         bead,
         worktreePath: worktree.path,
@@ -357,6 +363,12 @@ export async function runForegroundLoop(options: RunOptions = {}): Promise<RunSu
         transcriptPath,
       });
       if (mergeResult.status === "merged") {
+        if (mergeResult.stateError !== undefined) {
+          report(
+            `gis: main contains ${bead.id}, but closing the Beads issue failed; ` +
+            "the worktree was retained for manual reconciliation",
+          );
+        }
         if (mergeResult.cleanupError !== undefined) {
           report(
             `gis: cleanup failed for ${bead.id}; main and bd are merged, ` +
@@ -370,7 +382,19 @@ export async function runForegroundLoop(options: RunOptions = {}): Promise<RunSu
       if (error instanceof AlreadyBlockedError) {
         return { status: "blocked" };
       }
-      await beads.markBlocked(bead.id, handoff(worktree, transcriptPath));
+      await beads.markBlocked(bead.id, await currentHandoff());
+      return { status: "blocked" };
+    }
+  };
+
+  const processBeadSafely = async (bead: Bead): Promise<JobOutcome> => {
+    try {
+      return await processBead(bead);
+    } catch (error: unknown) {
+      report(
+        `gis: job ${bead.id} failed while recording recovery state: ` +
+        (error instanceof Error ? error.message : String(error)),
+      );
       return { status: "blocked" };
     }
   };
@@ -384,7 +408,7 @@ export async function runForegroundLoop(options: RunOptions = {}): Promise<RunSu
       if (active.has(bead.id)) {
         continue;
       }
-      const job = processBead(bead);
+      const job = processBeadSafely(bead);
       active.set(bead.id, job);
     }
 

@@ -113,7 +113,7 @@ test("performs typed in_progress, blocked, and closed transitions", async () => 
     assert.equal(closed.status, "closed");
     assert.deepEqual(await requestsFrom(log), [
       ["update", "gis-vst.3", "--status=in_progress", "--assignee=codex", "--json"],
-      ["update", "gis-vst.3", "--status=blocked", "--notes=worktree: /tmp/gis-vst.3; rounds: .gis/run; transcript: ~/.codex/sessions", "--json"],
+      ["update", "gis-vst.3", "--status=blocked", "--append-notes=worktree: /tmp/gis-vst.3; rounds: .gis/run; transcript: ~/.codex/sessions", "--json"],
       ["close", "gis-vst.3", "--reason=verified", "--json"],
     ]);
   });
@@ -150,7 +150,7 @@ test("writes dispatch, merge, and escalation states back to bd", async () => {
         "update",
         "gis-vst.11",
         "--status=blocked",
-        "--notes=worktree: /repo/.worktrees/gis-vst.11\nrounds: /repo/.worktrees/gis-vst.11/.gis/run\ntranscript: /home/kazu/.codex/sessions/2026/08/10/session.jsonl",
+        "--append-notes=worktree: /repo/.worktrees/gis-vst.11\nrounds: /repo/.worktrees/gis-vst.11/.gis/run\ntranscript: /home/kazu/.codex/sessions/2026/08/10/session.jsonl",
         "--json",
       ],
     ]);

@@ -25,6 +25,8 @@ function config(overrides = {}) {
     verify_max: 2,
     review_max: 1,
     blocked_timeout: "1s",
+    worker_timeout: "1h",
+    verify_timeout: "15m",
     claude_permission_mode: "auto",
     profiles: {
       plan: [{ kind: "codex", model: "plan", effort: "low" }],
@@ -186,6 +188,68 @@ test("blocks a bead when worktree creation fails without rejecting the run", asy
   }]);
 });
 
+test("contains a job whose recovery write fails and lets concurrent work finish", async () => {
+  const resultRoot = await mkdtemp(join(tmpdir(), "gis-run-contained-failure-"));
+  const failed = bead("gis-vst.failed");
+  const healthy = bead("gis-vst.healthy");
+  const reports = [];
+  let firstReady = true;
+  await writeFile(join(resultRoot, `${healthy.id}.json`), '{"status":"done","summary":"ok"}');
+
+  try {
+    const deps = dependencies(resultRoot);
+    const result = await runForegroundLoop({
+      config: config({ concurrency: 2 }),
+      beads: {
+        async ready() {
+          if (!firstReady) return [];
+          firstReady = false;
+          return [failed, healthy];
+        },
+        async dispatch(id) {
+          return { ...(id === healthy.id ? healthy : failed), status: "in_progress" };
+        },
+        async markBlocked(id) {
+          if (id === failed.id) throw new Error("bd locked");
+          return { ...healthy, id, status: "blocked" };
+        },
+        async createHumanGate() {
+          throw new Error("not used");
+        },
+      },
+      worktrees: {
+        async create(options) {
+          if (options.bead.id === failed.id) throw new Error("create failed");
+          return deps.worktrees.create(options);
+        },
+      },
+      workers: deps.workers,
+      blocked: {
+        async wait() {
+          return { status: "done", wasBlocked: false, worktreeRetained: false };
+        },
+      },
+      verify: {
+        async verify() {
+          return { status: "verified", attempts: 1, result: { passed: true } };
+        },
+      },
+      merge: {
+        async enqueue({ bead: issue }) {
+          return { status: "merged", bead: { ...issue, status: "closed" } };
+        },
+      },
+      report: (message) => reports.push(message),
+    });
+
+    assert.equal(result.merged, 1);
+    assert.equal(result.blocked, 1);
+    assert.match(reports.join("\n"), /job gis-vst\.failed.*bd locked/);
+  } finally {
+    await rm(resultRoot, { recursive: true, force: true });
+  }
+});
+
 test("falls back only after a runner start failure and records the selected kind", async () => {
   const resultRoot = await mkdtemp(join(tmpdir(), "gis-run-fallback-"));
   const source = bead("gis-vst.fallback");
@@ -304,6 +368,7 @@ test("creates a human gate in the run loop when the worker requests confirmation
   const gate = { ...bead("gis-vst.human-22"), labels: ["human"] };
   const gates = [];
   const calls = [];
+  let transcriptResolutions = 0;
   await writeFile(join(resultRoot, "gis-vst.22.json"), JSON.stringify({
     status: "failed",
     summary: "waiting for a decision",
@@ -341,6 +406,10 @@ test("creates a human gate in the run loop when the worker requests confirmation
           return { status: "done", wasBlocked: false, worktreeRetained: true };
         },
       },
+      resolveTranscript: async () => {
+        transcriptResolutions += 1;
+        return "/home/kazu/.codex/sessions/current.jsonl";
+      },
       report: (message) => calls.push(["summary", message]),
     });
 
@@ -352,6 +421,8 @@ test("creates a human gate in the run loop when the worker requests confirmation
     assert.equal(calls[2][0], "gate");
     assert.equal(calls[2][1].issueId, source.id);
     assert.equal(calls[2][1].reason, "approve the migration plan");
+    assert.equal(calls[1][2].transcriptPath, "/home/kazu/.codex/sessions/current.jsonl");
+    assert.equal(transcriptResolutions, 1);
     assert.match(calls.at(-1)[1], /1件が人間の確認待ち/);
   } finally {
     await rm(resultRoot, { recursive: true, force: true });

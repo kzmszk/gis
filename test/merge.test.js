@@ -23,13 +23,18 @@ function options(events, overrides = {}) {
     repositoryPath: "/repo",
     baseBranch: "main",
     verifyCommand: "npm test",
+    verifyTimeout: "15m",
     git: {
       async rebase(worktreePath, baseBranch) {
         events.push(`rebase:${worktreePath}:${baseBranch}`);
       },
+      async hasCommits() {
+        return true;
+      },
       async merge(repositoryPath, branch) {
         events.push(`merge:${repositoryPath}:${branch}`);
       },
+      async deleteBranch() {},
     },
     runVerify: async (command, cwd) => {
       events.push(`verify:${command}:${cwd}`);
@@ -102,6 +107,9 @@ test("serializes concurrent enqueue calls and continues after a blocked item", a
       await new Promise((resolve) => setTimeout(resolve, 5));
       active -= 1;
     },
+    async hasCommits() {
+      return true;
+    },
     async merge(repositoryPath, branch) {
       active += 1;
       maximumActive = Math.max(maximumActive, active);
@@ -109,6 +117,7 @@ test("serializes concurrent enqueue calls and continues after a blocked item", a
       await new Promise((resolve) => setTimeout(resolve, 5));
       active -= 1;
     },
+    async deleteBranch() {},
   };
   const verifyCalls = [];
   const queue = new SerialMergeQueue(options(events, {
@@ -156,6 +165,8 @@ test("does not merge, close, or remove before a successful post-rebase verify", 
     worktreePath: "/repo/.worktrees/gis-vst.10",
     roundLogPath: "/repo/.worktrees/gis-vst.10/.gis/run",
     transcriptPath: "/home/kazu/.codex/sessions/gis-vst.10.jsonl",
+    failurePhase: "verify",
+    failureDetail: "verification failed (exit code 1)\nstill failing",
   });
   assert.deepEqual(events, [
     "rebase:/repo/.worktrees/gis-vst.10:main",
@@ -187,9 +198,13 @@ test("blocks and retains the worktree when rebase fails", async () => {
       async rebase() {
         throw new Error("rebase conflict");
       },
+      async hasCommits() {
+        return true;
+      },
       async merge() {
         events.push("merge");
       },
+      async deleteBranch() {},
     },
   })).enqueue(item("gis-vst.10", events));
 
@@ -197,4 +212,42 @@ test("blocks and retains the worktree when rebase fails", async () => {
   assert.equal(result.phase, "rebase");
   assert.match(String(result.error), /rebase conflict/);
   assert.deepEqual(events, ["blocked:gis-vst.10:/repo/.worktrees/gis-vst.10"]);
+});
+
+test("blocks a bead whose branch has no commit ahead of base", async () => {
+  const events = [];
+  const result = await new SerialMergeQueue(options(events, {
+    git: {
+      async rebase() {},
+      async hasCommits() { return false; },
+      async merge() { events.push("merge"); },
+      async deleteBranch() {},
+    },
+  })).enqueue(item("gis-vst.empty", events));
+
+  assert.equal(result.status, "blocked");
+  assert.equal(result.phase, "commit");
+  assert.match(String(result.error), /no commit ahead/);
+  assert.deepEqual(events, ["blocked:gis-vst.empty:/repo/.worktrees/gis-vst.empty"]);
+});
+
+test("does not re-block after git merge when closing the bead fails", async () => {
+  const events = [];
+  const result = await new SerialMergeQueue(options(events, {
+    beads: {
+      async markMerged() {
+        events.push("close-failed");
+        throw new Error("bd locked");
+      },
+      async markBlocked() {
+        events.push("blocked");
+        throw new Error("must not re-block an integrated bead");
+      },
+    },
+  })).enqueue(item("gis-vst.integrated", events));
+
+  assert.equal(result.status, "merged");
+  assert.match(String(result.stateError), /bd locked/);
+  assert.equal(events.includes("blocked"), false);
+  assert.equal(events.includes("gis-vst.integrated:remove"), false);
 });
