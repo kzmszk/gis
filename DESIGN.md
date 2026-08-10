@@ -308,8 +308,10 @@ claude / codex は既に cwd ごとに完全な JSONL トランスクリプト�
 worktree ごとに cwd が違うので自動的に分離される。ただし、同じ worktree で複数セッションが
 動く可能性があるため、更新日時だけでは対応関係を決めない。herdr が agent ごとに報告する
 `agent_session`（`id` または `path`）から対象 JSONL を特定し、session ID と Codex の
-`session_meta.cwd` も一致することを確認する。session 参照を取得できない場合は別セッションを
-推測せず、索引を `unresolved` として残す。
+`session_meta.cwd` も一致することを確認する。最終的な索引作成時には同じ pane の live snapshot
+を優先し、snapshot を取得できない場合だけ起動・prompt 応答の参照を使う。同じ ID と cwd に
+一致する候補が複数ある場合やsession参照を取得できない場合は別セッションを推測せず、索引を
+`unresolved` として残す。
 
 **gis が残すのは「どの bead が、どの worktree で、どのトランスクリプトに対応するか」という索引だけ。**
 

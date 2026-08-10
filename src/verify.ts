@@ -31,6 +31,8 @@ export interface VerifyLoopOptions {
   readonly worktreePath: string;
   readonly runPath: string;
   readonly transcriptPath: string;
+  /** Resolve the live session again when a final failed attempt is handed off. */
+  readonly resolveTranscriptPath?: () => Promise<string>;
   readonly config: Pick<GisConfig, "verify" | "verify_max" | "verify_timeout">;
   readonly beads: VerifyLoopBeadsSource;
   /** Herdr target for the implementation pane; defaults to the bead ID. */
@@ -176,10 +178,13 @@ export async function runVerificationLoop(
     }
 
     if (attempt === options.config.verify_max) {
+      const transcriptPath = options.resolveTranscriptPath === undefined
+        ? options.transcriptPath
+        : await options.resolveTranscriptPath();
       const handoff: BeadHandoffLocations = {
         worktreePath: options.worktreePath,
         roundLogPath: options.runPath,
-        transcriptPath: options.transcriptPath,
+        transcriptPath,
       };
       const bead = await options.beads.markBlocked(options.bead.id, handoff);
       return { status: "blocked", attempts: attempt, result, handoff, bead };

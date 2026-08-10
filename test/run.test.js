@@ -416,6 +416,27 @@ test("creates a human gate in the run loop when the worker requests confirmation
           return { status: "done", wasBlocked: false, worktreeRetained: true };
         },
       },
+      herdr: {
+        async agentWait() {
+          throw new Error("unused");
+        },
+        async apiSnapshot() {
+          return {
+            type: "session_snapshot",
+            snapshot: {
+              agents: [{
+                pane_id: `pane-${source.id}`,
+                agent_session: {
+                  source: "runner",
+                  agent: "codex",
+                  kind: "id",
+                  value: `session-${source.id}`,
+                },
+              }],
+            },
+          };
+        },
+      },
       resolveTranscript: async (session, worktreePath) => {
         transcriptResolutions += 1;
         assert.deepEqual(session, {
@@ -446,7 +467,7 @@ test("creates a human gate in the run loop when the worker requests confirmation
   }
 });
 
-test("obtains a late agent session from the matching herdr pane", async () => {
+test("prefers the live pane session over a captured startup session", async () => {
   const resultRoot = await mkdtemp(join(tmpdir(), "gis-run-session-snapshot-"));
   const source = bead("gis-vst.session-snapshot");
   let ready = true;
@@ -482,7 +503,17 @@ test("obtains a late agent session from the matching herdr pane", async () => {
         async start({ bead: issue }) {
           return {
             prompt: { resultPath: join(resultRoot, `${issue.id}.json`) },
-            started: { agent: { pane_id: `pane-${issue.id}` } },
+            started: {
+              agent: {
+                pane_id: `pane-${issue.id}`,
+                agent_session: {
+                  source: "runner",
+                  agent: "codex",
+                  kind: "id",
+                  value: "stale-startup-session-id",
+                },
+              },
+            },
             prompted: { agent: { pane_id: `pane-${issue.id}` } },
           };
         },
@@ -522,6 +553,147 @@ test("obtains a late agent session from the matching herdr pane", async () => {
 
     assert.equal(result.humanWaiting, 1);
     assert.equal(resolvedSession.value, "exact-session-id");
+  } finally {
+    await rm(resultRoot, { recursive: true, force: true });
+  }
+});
+
+test("falls back to the captured session only when snapshot retrieval fails", async () => {
+  const resultRoot = await mkdtemp(join(tmpdir(), "gis-run-session-fallback-"));
+  const source = bead("gis-vst.session-fallback");
+  let ready = true;
+  let resolvedSession;
+  await writeFile(join(resultRoot, `${source.id}.json`), JSON.stringify({
+    status: "failed",
+    summary: "waiting",
+    needs_human: "inspect state",
+  }));
+
+  try {
+    const deps = dependencies(resultRoot);
+    const result = await runForegroundLoop({
+      config: config({ concurrency: 1 }),
+      beads: {
+        async ready() {
+          if (!ready) return [];
+          ready = false;
+          return [source];
+        },
+        async dispatch() {
+          return { ...source, status: "in_progress" };
+        },
+        async markBlocked() {
+          return { ...source, status: "blocked" };
+        },
+        async createHumanGate() {
+          return { ...bead("gis-vst.human-session-fallback"), labels: ["human"] };
+        },
+      },
+      worktrees: deps.worktrees,
+      workers: deps.workers,
+      blocked: {
+        async wait() {
+          return { status: "done", wasBlocked: false, worktreeRetained: true };
+        },
+      },
+      herdr: {
+        async agentWait() {
+          throw new Error("unused");
+        },
+        async apiSnapshot() {
+          throw new Error("herdr unavailable");
+        },
+      },
+      resolveTranscript: async (session) => {
+        resolvedSession = session;
+        return "/home/kazu/.codex/sessions/captured-session.jsonl";
+      },
+      report: () => undefined,
+    });
+
+    assert.equal(result.humanWaiting, 1);
+    assert.equal(resolvedSession.value, `session-${source.id}`);
+  } finally {
+    await rm(resultRoot, { recursive: true, force: true });
+  }
+});
+
+test("refreshes the live session after verification before merge", async () => {
+  const resultRoot = await mkdtemp(join(tmpdir(), "gis-run-session-refresh-"));
+  const source = bead("gis-vst.session-refresh");
+  let ready = true;
+  let liveSessionId = "session-before-verify";
+  let mergedTranscript;
+  await writeFile(join(resultRoot, `${source.id}.json`),
+    '{"status":"done","summary":"ok"}');
+
+  try {
+    const deps = dependencies(resultRoot);
+    const result = await runForegroundLoop({
+      config: config({ concurrency: 1 }),
+      beads: {
+        async ready() {
+          if (!ready) return [];
+          ready = false;
+          return [source];
+        },
+        async dispatch() {
+          return { ...source, status: "in_progress" };
+        },
+        async markBlocked() {
+          throw new Error("successful bead must not block");
+        },
+        async createHumanGate() {
+          throw new Error("human gate must not be created");
+        },
+      },
+      worktrees: deps.worktrees,
+      workers: deps.workers,
+      blocked: {
+        async wait() {
+          return { status: "done", wasBlocked: false, worktreeRetained: false };
+        },
+      },
+      herdr: {
+        async agentWait() {
+          throw new Error("unused");
+        },
+        async apiSnapshot() {
+          return {
+            type: "session_snapshot",
+            snapshot: {
+              agents: [{
+                pane_id: `pane-${source.id}`,
+                agent_session: {
+                  source: "runner",
+                  agent: "codex",
+                  kind: "id",
+                  value: liveSessionId,
+                },
+              }],
+            },
+          };
+        },
+      },
+      resolveTranscript: async (session) => `/sessions/${session.value}.jsonl`,
+      verify: {
+        async verify(options) {
+          assert.equal(options.transcriptPath, "/sessions/session-before-verify.jsonl");
+          liveSessionId = "session-after-verify";
+          return { status: "verified", attempts: 1, result: { passed: true } };
+        },
+      },
+      merge: {
+        async enqueue({ bead: issue, transcriptPath }) {
+          mergedTranscript = transcriptPath;
+          return { status: "merged", bead: { ...issue, status: "closed" } };
+        },
+      },
+      report: () => undefined,
+    });
+
+    assert.equal(result.merged, 1);
+    assert.equal(mergedTranscript, "/sessions/session-after-verify.jsonl");
   } finally {
     await rm(resultRoot, { recursive: true, force: true });
   }

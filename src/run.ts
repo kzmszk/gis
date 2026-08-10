@@ -160,17 +160,26 @@ async function findWorkerSession(
   herdr: RunHerdrSource,
 ): Promise<AgentSessionInfo | undefined> {
   const direct = agentSession(started.prompted?.agent) ?? agentSession(started.started?.agent);
-  if (direct !== undefined || herdr.apiSnapshot === undefined) {
+  if (herdr.apiSnapshot === undefined) {
     return direct;
   }
 
-  const paneId = started.prompted?.agent?.pane_id ?? started.started?.agent?.pane_id;
-  const agents = (await herdr.apiSnapshot()).snapshot.agents;
-  const exactPane = paneId === undefined
-    ? undefined
-    : agents.find((agent) => agent.pane_id === paneId);
-  const named = agents.find((agent) => agent.name === beadId);
-  return agentSession(exactPane) ?? agentSession(named);
+  try {
+    const paneId = started.prompted?.agent?.pane_id ?? started.started?.agent?.pane_id;
+    const agents = (await herdr.apiSnapshot()).snapshot.agents;
+    const exactPane = paneId === undefined
+      ? undefined
+      : agents.find((agent) => agent.pane_id === paneId);
+    if (exactPane !== undefined) {
+      return agentSession(exactPane);
+    }
+    const named = agents.find((agent) => agent.name === beadId);
+    return agentSession(named);
+  } catch {
+    // A captured start/prompt response is only a fallback when live state
+    // cannot be read. A successful snapshot without a session is authoritative.
+    return direct;
+  }
 }
 
 export function formatRunSummary(summary: Omit<RunSummary, "text">): string {
@@ -280,14 +289,13 @@ export async function runForegroundLoop(options: RunOptions = {}): Promise<RunSu
       return { status: "blocked" };
     }
 
-    let resolvedSession: AgentSessionInfo | undefined;
     const currentTranscriptPath = async (): Promise<string> => {
       try {
-        resolvedSession ??= await findWorkerSession(started, bead.id, herdr);
-        if (resolvedSession === undefined) {
+        const session = await findWorkerSession(started, bead.id, herdr);
+        if (session === undefined) {
           return defaultTranscriptPath(workerKind!, worktree.path);
         }
-        return await resolveTranscript(resolvedSession, worktree.path) ??
+        return await resolveTranscript(session, worktree.path) ??
           defaultTranscriptPath(workerKind!, worktree.path);
       } catch {
         return defaultTranscriptPath(workerKind!, worktree.path);
@@ -354,6 +362,7 @@ export async function runForegroundLoop(options: RunOptions = {}): Promise<RunSu
         worktreePath: worktree.path,
         runPath: worktree.runPath,
         transcriptPath,
+        resolveTranscriptPath: currentTranscriptPath,
         config,
         beads,
         target: bead.id,
@@ -369,10 +378,11 @@ export async function runForegroundLoop(options: RunOptions = {}): Promise<RunSu
         return { status: "blocked" };
       }
 
+      const finalTranscriptPath = await currentTranscriptPath();
       const mergeResult = await merge.enqueue({
         bead,
         worktree,
-        transcriptPath,
+        transcriptPath: finalTranscriptPath,
       });
       if (mergeResult.status === "merged") {
         if (mergeResult.stateError !== undefined) {

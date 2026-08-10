@@ -129,6 +129,29 @@ test("resolves the exact Codex session ID and validates its cwd", async () => {
   });
 });
 
+test("does not choose between duplicate Codex files for the same session", async () => {
+  await withTranscriptRoots(async (home, options) => {
+    const cwd = "/repo/.worktrees/gis-vst.12";
+    const firstDirectory = join(home, ".codex", "sessions", "2026", "08", "10");
+    const secondDirectory = join(home, ".codex", "sessions", "2026", "08", "11");
+    await mkdir(firstDirectory, { recursive: true });
+    await mkdir(secondDirectory, { recursive: true });
+    const metadata = JSON.stringify({
+      type: "session_meta",
+      payload: { id: "duplicate-session", cwd },
+    }) + "\n";
+    await writeFile(join(firstDirectory, "rollout-first-duplicate-session.jsonl"), metadata);
+    await writeFile(join(secondDirectory, "rollout-second-duplicate-session.jsonl"), metadata);
+
+    assert.equal(await resolveAgentSessionTranscript({
+      source: "codex-sessions",
+      agent: "codex",
+      kind: "id",
+      value: "duplicate-session",
+    }, cwd, options), undefined);
+  });
+});
+
 test("uses a path session reference directly", async () => {
   await withTranscriptRoots(async (home, options) => {
     const cwd = "/repo/.worktrees/gis-vst.12";

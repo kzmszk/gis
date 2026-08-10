@@ -329,6 +329,7 @@ async function resolveCodexSessionId(
   const candidates = (await jsonlFiles(codexSessionsDirectory(options), true))
     .filter((path) => filenameHasSessionId(path, sessionId));
 
+  const matches: string[] = [];
   for (const candidate of candidates) {
     let metadata: CodexSessionMetadata | undefined;
     try {
@@ -342,10 +343,10 @@ async function resolveCodexSessionId(
     if (metadata?.id === sessionId &&
       metadata.cwd !== undefined &&
       absoluteCwd(metadata.cwd) === expectedCwd) {
-      return candidate;
+      matches.push(candidate);
     }
   }
-  return undefined;
+  return matches.length === 1 ? matches[0] : undefined;
 }
 
 /** Resolve the exact transcript reference reported by herdr for one agent session. */

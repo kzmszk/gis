@@ -76,7 +76,7 @@ if (args[0] === "worktree" && args[1] === "list") {
   return bin;
 }
 
-function snapshot() {
+function snapshot(agents = []) {
   return {
     type: "session_snapshot",
     snapshot: {
@@ -86,7 +86,7 @@ function snapshot() {
       tabs: [],
       panes: [],
       layouts: [],
-      agents: [],
+      agents,
     },
   };
 }
@@ -100,6 +100,7 @@ test("gis run connects default bd, herdr, and git adapters through merge cleanup
   const worktreePath = join(root, "worktrees", bead.id);
   const baseCwd = await realpath(root);
   const herdrEvents = [];
+  let agentSessionReported = false;
   await mkdir(join(root, ".gis"), { recursive: true });
   await writeFile(statePath, JSON.stringify({ status: "open" }), "utf8");
   await writeFile(join(root, ".gis", "config.toml"), [
@@ -122,7 +123,18 @@ test("gis run connects default bd, herdr, and git adapters through merge cleanup
       herdrEvents.push(request.method);
       let result;
       if (request.method === "session.snapshot") {
-        result = snapshot();
+        result = snapshot(agentSessionReported ? [{
+          pane_id: `pane-${bead.id}`,
+          workspace_id: `ws-${bead.id}`,
+          tab_id: `tab-${bead.id}`,
+          agent_status: "done",
+          agent_session: {
+            source: "integration-test",
+            agent: "codex",
+            kind: "path",
+            value: join(worktreePath, ".gis", "run", "worker.jsonl"),
+          },
+        }] : []);
       } else if (request.method === "worktree.create") {
         await mkdir(join(root, "worktrees", bead.id, ".gis", "run"), { recursive: true });
         result = {
@@ -149,6 +161,7 @@ test("gis run connects default bd, herdr, and git adapters through merge cleanup
           argv: request.params.args ?? [],
         };
       } else if (request.method === "agent.prompt") {
+        agentSessionReported = true;
         await Promise.all([
           writeFile(
             join(worktreePath, ".gis", "run", "round-1-impl.json"),
@@ -219,6 +232,8 @@ test("gis run connects default bd, herdr, and git adapters through merge cleanup
       "agent.start",
       "agent.prompt",
       "agent.wait",
+      "session.snapshot",
+      "session.snapshot",
       "worktree.remove",
     ]);
     assert.deepEqual(

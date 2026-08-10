@@ -151,6 +151,25 @@ test("blocks exactly at verify_max without an extra retry and keeps all three ha
   });
 });
 
+test("refreshes the transcript before a final verification handoff", async () => {
+  const marked = [];
+  const result = await runVerificationLoop(options({
+    config: { verify: "npm test", verify_max: 1, verify_timeout: "15m" },
+    runVerify: async () => ({ passed: false, stderr: "still failing" }),
+    resolveTranscriptPath: async () => "/home/kazu/.codex/sessions/live-session.jsonl",
+    beads: {
+      async markBlocked(issueId, locations) {
+        marked.push({ issueId, locations });
+        return { ...bead, id: issueId, status: "blocked", priority: 2, issue_type: "task" };
+      },
+    },
+  }));
+
+  assert.equal(result.status, "blocked");
+  assert.equal(marked[0].locations.transcriptPath,
+    "/home/kazu/.codex/sessions/live-session.jsonl");
+});
+
 test("rejects a non-positive verify_max before running a command", async () => {
   await assert.rejects(
     runVerificationLoop(options({ config: { verify: "npm test", verify_max: 0 } })),
