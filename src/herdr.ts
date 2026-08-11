@@ -354,7 +354,11 @@ export class HerdrClient {
       addIfDefined(wait, "timeout_ms", options.wait.timeoutMs);
       params.wait = wait;
     }
-    return this.request<AgentPromptedResult>("agent.prompt", params);
+    return this.request<AgentPromptedResult>(
+      "agent.prompt",
+      params,
+      options.wait?.timeoutMs,
+    );
   }
 
   agentWait(target: string, options: AgentWaitOptions = {}): Promise<AgentWaitResult> {

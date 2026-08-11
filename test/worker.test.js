@@ -92,8 +92,8 @@ test("starts the worker after writing prompt.md and injects exactly one TUI line
             },
           };
         },
-        async agentPrompt(target, text) {
-          calls.push({ type: "prompt", target, text });
+        async agentPrompt(target, text, options) {
+          calls.push({ type: "prompt", target, text, options });
           return {
             type: "agent_prompted",
             agent: {
@@ -132,9 +132,11 @@ test("starts the worker after writing prompt.md and injects exactly one TUI line
     });
     assert.ok(calls[1].options.timeoutMs > 3_000);
     assert.ok(calls[1].options.timeoutMs <= 30_000);
-    assert.deepEqual(calls[3],
-      { type: "prompt", target: "gis-vst.6", text: WORKER_PROMPT },
-    );
+    assert.equal(calls[3].target, "gis-vst.6");
+    assert.equal(calls[3].text, WORKER_PROMPT);
+    assert.deepEqual(calls[3].options.wait.until, ["working"]);
+    assert.ok(calls[3].options.wait.timeoutMs > 0);
+    assert.ok(calls[3].options.wait.timeoutMs <= 30_000);
     assert.equal(WORKER_PROMPT, "Read .gis/run/prompt.md and execute it.");
     assert.equal(calls.filter((call) => call.type === "prompt").length, 1);
   } finally {

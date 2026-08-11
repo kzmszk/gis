@@ -324,6 +324,7 @@ export async function runForegroundLoop(options: RunOptions = {}): Promise<RunSu
     try {
       waitResult = await blocked.wait(waitOptions);
     } catch (error: unknown) {
+      report(`gis: worker wait failed for ${bead.id}: ${errorMessage(error)}`);
       await beads.markBlocked(bead.id, await currentHandoff());
       return { status: "blocked" };
     }
@@ -335,6 +336,7 @@ export async function runForegroundLoop(options: RunOptions = {}): Promise<RunSu
     try {
       result = await readWorkerResult(started.prompt.resultPath);
     } catch (error: unknown) {
+      report(`gis: worker result read failed for ${bead.id}: ${errorMessage(error)}`);
       await beads.markBlocked(bead.id, await currentHandoff());
       return { status: "blocked" };
     }
@@ -355,6 +357,14 @@ export async function runForegroundLoop(options: RunOptions = {}): Promise<RunSu
       }
     }
     if (result.kind !== "success") {
+      const detail = result.kind === "failure"
+        ? result.result.summary
+        : result.kind === "invalid_schema"
+        ? result.issues.join("; ")
+        : result.kind === "invalid_json"
+        ? result.message
+        : `result file is missing: ${result.path}`;
+      report(`gis: worker result ${result.kind} for ${bead.id}: ${detail}`);
       await beads.markBlocked(bead.id, await currentHandoff());
       return { status: "blocked" };
     }

@@ -81,8 +81,8 @@ test("retries in the same pane and records verification feedback in the next rou
           : { passed: true, stdout: "ok" };
       },
       herdr: {
-        async agentPrompt(target, text) {
-          prompts.push({ target, text });
+        async agentPrompt(target, text, promptOptions) {
+          prompts.push({ target, text, promptOptions });
           return {};
         },
       },
@@ -94,7 +94,11 @@ test("retries in the same pane and records verification feedback in the next rou
     assert.equal(result.status, "verified");
     assert.equal(result.attempts, 2);
     assert.deepEqual(verifies, [["npm test", root, 900_000], ["npm test", root, 900_000]]);
-    assert.deepEqual(prompts, [{ target: bead.id, text: "Read .gis/run/prompt.md and execute it." }]);
+    assert.deepEqual(prompts, [{
+      target: bead.id,
+      text: "Read .gis/run/prompt.md and execute it.",
+      promptOptions: { wait: { until: ["working"], timeoutMs: 10_000 } },
+    }]);
     assert.deepEqual(waits, [true]);
     const prompt = await readFile(join(runPath, "prompt.md"), "utf8");
     assert.match(prompt, /Previous verification failure/);

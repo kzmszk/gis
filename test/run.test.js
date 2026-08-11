@@ -254,6 +254,57 @@ test("reports readiness failure without falling back after a worker was started"
   }
 });
 
+test("reports an agent wait failure before retaining the blocked worktree", async () => {
+  const resultRoot = await mkdtemp(join(tmpdir(), "gis-run-wait-failure-"));
+  const source = bead("gis-vst.wait-failure");
+  const reports = [];
+  let ready = true;
+
+  try {
+    const result = await runForegroundLoop({
+      config: config({ concurrency: 1 }),
+      beads: {
+        async ready() {
+          if (!ready) return [];
+          ready = false;
+          return [source];
+        },
+        async dispatch() {
+          return { ...source, status: "in_progress" };
+        },
+        async markBlocked() {
+          return { ...source, status: "blocked" };
+        },
+        async createHumanGate() {
+          throw new Error("human gate must not be created");
+        },
+      },
+      worktrees: dependencies(resultRoot).worktrees,
+      workers: dependencies(resultRoot).workers,
+      blocked: {
+        async wait() {
+          throw new Error("agent is no longer running in the target pane");
+        },
+      },
+      herdr: {
+        async apiSnapshot() {
+          throw new Error("snapshot unavailable");
+        },
+      },
+      resolveTranscript: async () => undefined,
+      report: (message) => reports.push(message),
+    });
+
+    assert.equal(result.blocked, 1);
+    assert.match(
+      reports.join("\n"),
+      /worker wait failed for gis-vst\.wait-failure: agent is no longer running/,
+    );
+  } finally {
+    await rm(resultRoot, { recursive: true, force: true });
+  }
+});
+
 test("contains a job whose recovery write fails and lets concurrent work finish", async () => {
   const resultRoot = await mkdtemp(join(tmpdir(), "gis-run-contained-failure-"));
   const failed = bead("gis-vst.failed");

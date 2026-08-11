@@ -53,7 +53,8 @@ herdr worktree remove
 Herdr UIで現在focusされているworkspaceへ依存しない。`agent.start`は最大30秒、
 その応答後も`session.snapshot`で対象paneに同名runnerが登録され、
 runner kindと起動前より新しいstate changeを持ち、`interactive_ready=true`になるまで
-同じ起動時間枠内で待ってから最初のpromptを送る。各API失敗時は
+同じ起動時間枠内で待ってから最初のpromptを送る。prompt後は`working`への状態遷移を
+Herdrに確認させ、updater等に入力が吸われた場合は再送せずblockedにする。各API失敗時は
 worktree/start/promptのフェーズとHerdrのエラー内容を表示してからblockedへ移す。
 
 herdr は claude / codex / pi を一級市民として認識し、`working / blocked / done` の状態検知を提供する。

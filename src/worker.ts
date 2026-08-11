@@ -7,6 +7,7 @@ import {
   type AgentStartedResult,
   type HerdrClient,
   type AgentStartOptions,
+  type AgentPromptOptions,
   type SessionSnapshotResult,
 } from "./herdr.js";
 import { parseDurationMs, type GisConfig, type ProfileCandidate } from "./config.js";
@@ -17,6 +18,7 @@ export const WORKER_PROMPT = "Read .gis/run/prompt.md and execute it.";
 const MAX_AGENT_START_TIMEOUT_MS = 30_000;
 const MIN_AGENT_START_TIMEOUT_MS = 3_000;
 const AGENT_READY_POLL_MS = 50;
+const PROMPT_ACCEPT_TIMEOUT_MS = 10_000;
 
 export interface WorkerPromptOptions {
   readonly bead: Pick<Bead, "id" | "description" | "acceptance_criteria">;
@@ -38,11 +40,19 @@ export interface WorkerPrompt {
 export interface WorkerStartupSource {
   agentStart(options: AgentStartOptions): Promise<AgentStartedResult>;
   apiSnapshot(timeoutMs?: number): Promise<SessionSnapshotResult>;
-  agentPrompt(target: string, text: string): Promise<AgentPromptedResult>;
+  agentPrompt(
+    target: string,
+    text: string,
+    options?: AgentPromptOptions,
+  ): Promise<AgentPromptedResult>;
 }
 
 export interface WorkerPromptSource {
-  agentPrompt(target: string, text: string): Promise<AgentPromptedResult>;
+  agentPrompt(
+    target: string,
+    text: string,
+    options?: AgentPromptOptions,
+  ): Promise<AgentPromptedResult>;
 }
 
 export interface PromptedWorker {
@@ -175,6 +185,10 @@ function defaultHerdr(): WorkerStartupSource {
   return createHerdrAdapter() as HerdrClient;
 }
 
+function promptAcceptanceOptions(timeoutMs: number): AgentPromptOptions {
+  return { wait: { until: ["working"], timeoutMs } };
+}
+
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
@@ -246,7 +260,11 @@ export async function promptWorker(options: PromptWorkerOptions): Promise<Prompt
   requireNonEmpty(options.target, "target");
   const prompt = await writeWorkerPrompt(options);
   const herdr = options.herdr ?? defaultHerdr();
-  const prompted = await herdr.agentPrompt(options.target, WORKER_PROMPT);
+  const prompted = await herdr.agentPrompt(
+    options.target,
+    WORKER_PROMPT,
+    promptAcceptanceOptions(PROMPT_ACCEPT_TIMEOUT_MS),
+  );
   return { prompt, prompted };
 }
 
@@ -311,7 +329,19 @@ export async function startWorker(options: StartWorkerOptions): Promise<StartedW
 
   let prompted: AgentPromptedResult;
   try {
-    prompted = await herdr.agentPrompt(options.bead.id, WORKER_PROMPT);
+    const promptTimeoutMs = remainingTime(deadline);
+    if (promptTimeoutMs === 0) {
+      throw new Error(`prompting agent ${options.bead.id} timed out`);
+    }
+    prompted = await beforeDeadline(
+      herdr.agentPrompt(
+        options.bead.id,
+        WORKER_PROMPT,
+        promptAcceptanceOptions(promptTimeoutMs),
+      ),
+      deadline,
+      `prompting agent ${options.bead.id}`,
+    );
   } catch (error: unknown) {
     throw new WorkerStartupError("prompt", error);
   }
