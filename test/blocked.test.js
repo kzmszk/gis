@@ -33,6 +33,15 @@ const doneResult = {
   },
 };
 
+const currentDoneResult = {
+  type: "agent_info",
+  agent: {
+    agent: "codex",
+    agent_status: "done",
+    pane_id: "w1:p1",
+  },
+};
+
 test("parses blocked timeout durations and formats a human notification", () => {
   assert.equal(parseBlockedTimeout("500ms"), 500);
   assert.equal(parseBlockedTimeout("15m"), 900_000);
@@ -75,6 +84,26 @@ test("keeps the blocked pane available while a human resumes it", async () => {
     { target: handoff.target, options: { until: ["done", "blocked"], timeoutMs: 3_600_000 } },
     { target: handoff.target, options: { until: ["done"], timeoutMs: 500 } },
   ]);
+});
+
+test("accepts agent_info when the requested state was already reached", async () => {
+  const result = await waitForAgentWithBlockedHandling({
+    ...handoff,
+    herdr: {
+      agentWait: async () => currentDoneResult,
+    },
+    beads: {
+      markBlocked: async () => {
+        throw new Error("unused");
+      },
+    },
+  });
+
+  assert.deepEqual(result, {
+    status: "done",
+    wasBlocked: false,
+    worktreeRetained: false,
+  });
 });
 
 test("marks the bead blocked after the human wait times out and keeps handoff paths", async () => {

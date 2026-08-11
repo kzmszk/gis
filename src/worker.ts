@@ -15,9 +15,10 @@ import { buildAgentStartArgs } from "./profiles.js";
 
 /** The only text that gis injects into a worker's interactive TUI. */
 export const WORKER_PROMPT = "Read .gis/run/prompt.md and execute it.";
-const MAX_AGENT_START_TIMEOUT_MS = 30_000;
+const MAX_AGENT_START_TIMEOUT_MS = 300_000;
 const MIN_AGENT_START_TIMEOUT_MS = 3_000;
 const AGENT_READY_POLL_MS = 50;
+const IDLE_READINESS_FALLBACK_MS = 30_000;
 const PROMPT_ACCEPT_TIMEOUT_MS = 10_000;
 
 export interface WorkerPromptOptions {
@@ -70,6 +71,8 @@ export interface StartWorkerOptions extends WorkerPromptOptions {
   readonly candidate: ProfileCandidate;
   readonly config: Pick<GisConfig, "claude_permission_mode" | "worker_timeout">;
   readonly herdr?: WorkerStartupSource;
+  /** Test seam for Herdr versions that leave an otherwise-idle agent launch-pending. */
+  readonly idleReadinessFallbackMs?: number;
 }
 
 export interface StartedWorker {
@@ -150,8 +153,12 @@ function promptContent(
     "",
     "## Commit requirement",
     "",
+    "The user explicitly authorizes one task commit on this bead branch.",
+    "This task-specific authorization overrides any conservative or no-git default printed by `bd prime`.",
     "Commit all intended implementation changes on this bead branch before reporting completion.",
     "Do not report done when the branch has no commit ahead of the configured base.",
+    "Do not push the branch, and do not run `bd dolt push`.",
+    "Do not close, reopen, or otherwise change the Bead status; GIS owns task-state transitions.",
     "",
     ...verificationFeedback(options.verificationFeedback),
     "## Result file",
@@ -229,7 +236,10 @@ async function waitForNamedAgentReady(
   kind: string,
   previousStateChangeSeq: number,
   deadline: number,
+  idleFallbackMs: number,
 ): Promise<void> {
+  let idleSince: number | undefined;
+  let idleStateChangeSeq: number | undefined;
   while (true) {
     const { snapshot } = await beforeDeadline(
       herdr.apiSnapshot(remainingTime(deadline)),
@@ -237,12 +247,27 @@ async function waitForNamedAgentReady(
       `waiting for agent ${name} readiness snapshot`,
     );
     const agent = snapshot.agents.find((candidate) => candidate.pane_id === paneId);
-    if (agent?.name === name &&
+    const matchesStartedAgent = agent?.name === name &&
         agent.agent === kind &&
-        agent.interactive_ready === true &&
         typeof agent.state_change_seq === "number" &&
-        agent.state_change_seq > previousStateChangeSeq) {
+        agent.state_change_seq > previousStateChangeSeq;
+    if (matchesStartedAgent && agent.interactive_ready === true) {
       return;
+    }
+
+    if (matchesStartedAgent &&
+        agent.launch_pending === true &&
+        agent.agent_status === "idle") {
+      if (idleStateChangeSeq !== agent.state_change_seq) {
+        idleSince = Date.now();
+        idleStateChangeSeq = agent.state_change_seq;
+      }
+      if (idleSince !== undefined && Date.now() - idleSince >= idleFallbackMs) {
+        return;
+      }
+    } else {
+      idleSince = undefined;
+      idleStateChangeSeq = undefined;
     }
 
     const remainingMs = remainingTime(deadline);
@@ -272,6 +297,10 @@ export async function promptWorker(options: PromptWorkerOptions): Promise<Prompt
 export async function startWorker(options: StartWorkerOptions): Promise<StartedWorker> {
   requireNonEmpty(options.paneId, "paneId");
   requireNonEmpty(options.candidate.kind, "candidate.kind");
+  const idleFallbackMs = options.idleReadinessFallbackMs ?? IDLE_READINESS_FALLBACK_MS;
+  if (!Number.isFinite(idleFallbackMs) || idleFallbackMs < 0) {
+    throw new RangeError("idleReadinessFallbackMs must be a non-negative finite number");
+  }
 
   const prompt = await writeWorkerPrompt(options);
   const herdr = options.herdr ?? defaultHerdr();
@@ -322,6 +351,7 @@ export async function startWorker(options: StartWorkerOptions): Promise<StartedW
       options.candidate.kind,
       previousStateChangeSeq,
       deadline,
+      idleFallbackMs,
     );
   } catch (error: unknown) {
     throw new WorkerStartupError("readiness", error);

@@ -58,7 +58,9 @@ export function formatBlockedNotification(options: Pick<
 }
 
 function statusFromWait(result: AgentWaitResult): AgentStatus {
-  const status = result.event.data.agent_status;
+  const status = result.type === "agent_info"
+    ? result.agent.agent_status
+    : result.event.data.agent_status;
   if (status === "done" || status === "blocked") {
     return status;
   }

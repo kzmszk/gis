@@ -120,6 +120,7 @@ export interface AgentInfo {
   name?: string | null;
   agent_status: AgentStatus;
   interactive_ready?: boolean;
+  launch_pending?: boolean;
   state_change_seq?: number;
   agent_session?: AgentSessionInfo | null;
   [key: string]: unknown;
@@ -143,7 +144,7 @@ export interface AgentPromptedResult {
   agent: AgentInfo;
 }
 
-export interface AgentWaitResult {
+export interface AgentWaitMatchedResult {
   type: "wait_matched";
   event: {
     event: string;
@@ -154,6 +155,14 @@ export interface AgentWaitResult {
     };
   };
 }
+
+/** Herdr returns the current agent directly when it already matches `until`. */
+export interface AgentWaitInfoResult {
+  type: "agent_info";
+  agent: AgentInfo;
+}
+
+export type AgentWaitResult = AgentWaitMatchedResult | AgentWaitInfoResult;
 
 export interface AgentReadResult {
   type: "pane_read";
@@ -367,7 +376,7 @@ export class HerdrClient {
       until: options.until === undefined ? ["done", "blocked"] : [...options.until],
     };
     addIfDefined(params, "timeout_ms", options.timeoutMs);
-    return this.request<AgentWaitResult>("agent.wait", params);
+    return this.request<AgentWaitResult>("agent.wait", params, options.timeoutMs);
   }
 
   agentRead(target: string, options: AgentReadOptions = {}): Promise<AgentReadResult> {

@@ -41,7 +41,7 @@ beads で管理されたチケットを、git worktree で分離された複数�
 
 ```
 herdr worktree create --cwd <repo> --path <repo>/.worktrees/<bead-id> --branch <bead-id> --base main
-herdr agent start <name> --kind <claude|codex|pi> --pane <id> --timeout 30000
+herdr agent start <name> --kind <claude|codex|pi> --pane <id> --timeout 300000
 herdr agent prompt <name> "Read .gis/prompt.md and execute it."
 herdr agent wait <name> --until done --until blocked
 herdr agent read <name> --lines N
@@ -50,10 +50,13 @@ herdr worktree remove
 ```
 
 `worktree.create`にはorchestratorのrepository cwdと絶対checkout pathを必ず渡し、
-Herdr UIで現在focusされているworkspaceへ依存しない。`agent.start`は最大30秒、
+Herdr UIで現在focusされているworkspaceへ依存しない。`agent.start`はHerdrの上限と同じ最大300秒、
 その応答後も`session.snapshot`で対象paneに同名runnerが登録され、
 runner kindと起動前より新しいstate changeを持ち、`interactive_ready=true`になるまで
-同じ起動時間枠内で待ってから最初のpromptを送る。prompt後は`working`への状態遷移を
+同じ起動時間枠内で待ってから最初のpromptを送る。Herdr 0.7.5が入力可能なCodexを
+`launch_pending=true`のまま残す場合は、完全一致したagentのidle状態が30秒継続した
+場合だけreadiness fallbackとし、`state_change_seq`が変われば安定時間を数え直す。
+prompt後は`working`への状態遷移を
 Herdrに確認させ、updater等に入力が吸われた場合は再送せずblockedにする。各API失敗時は
 worktree/start/promptのフェーズとHerdrのエラー内容を表示してからblockedへ移す。
 
@@ -176,7 +179,9 @@ verify は無料（数十秒の CPU）、レビューは有料（サブスク枠
 
 個別に通ったブランチ同士が合流すると壊れる、というのが並列開発の主要な失敗モードである。
 これは**捨ててはいけない複雑さ**（Gas Town の Refinery が存在する理由もここ）。
-ワーカーには変更を commit してから完了報告するよう指示し、マージキューでも
+ワーカーには、Beads の保守的な既定表示より当該 task の明示的な commit 権限が
+優先すること、push はしないこと、変更を commit してから完了報告することを指示し、
+Bead の status 遷移は GIS が所有してワーカー自身には変更させない。マージキューでも
 `base..HEAD` が空でないことを検証する。変更ゼロのブランチを成功扱いして bead を close しない。
 
 ---

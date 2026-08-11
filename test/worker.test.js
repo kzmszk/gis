@@ -36,6 +36,10 @@ test("writes the detailed worker instructions and result protocol to prompt.md",
     assert.match(prompt.content, /\.gis\/run\/round-2-impl\.json/);
     assert.match(prompt.content, /status.*done.*failed/s);
     assert.match(prompt.content, /Commit all intended implementation changes/);
+    assert.match(prompt.content, /explicitly authorizes one task commit/);
+    assert.match(prompt.content, /overrides any conservative or no-git default/);
+    assert.match(prompt.content, /Do not push the branch/);
+    assert.match(prompt.content, /GIS owns task-state transitions/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -130,13 +134,13 @@ test("starts the worker after writing prompt.md and injects exactly one TUI line
       ],
       timeoutMs: calls[1].options.timeoutMs,
     });
-    assert.ok(calls[1].options.timeoutMs > 3_000);
-    assert.ok(calls[1].options.timeoutMs <= 30_000);
+    assert.ok(calls[1].options.timeoutMs >= 299_000);
+    assert.ok(calls[1].options.timeoutMs <= 300_000);
     assert.equal(calls[3].target, "gis-vst.6");
     assert.equal(calls[3].text, WORKER_PROMPT);
     assert.deepEqual(calls[3].options.wait.until, ["working"]);
-    assert.ok(calls[3].options.wait.timeoutMs > 0);
-    assert.ok(calls[3].options.wait.timeoutMs <= 30_000);
+    assert.ok(calls[3].options.wait.timeoutMs >= 299_000);
+    assert.ok(calls[3].options.wait.timeoutMs <= 300_000);
     assert.equal(WORKER_PROMPT, "Read .gis/run/prompt.md and execute it.");
     assert.equal(calls.filter((call) => call.type === "prompt").length, 1);
   } finally {
@@ -229,6 +233,161 @@ test("waits for the named agent in the target pane to become interactive-ready",
     });
 
     assert.deepEqual(calls, ["snapshot", "start", "snapshot", "snapshot", "prompt"]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("falls back after the exact launch-pending agent stays idle", async () => {
+  const root = await mkdtemp(join(tmpdir(), "gis-worker-idle-ready-"));
+  const calls = [];
+  let started = false;
+  try {
+    await startWorker({
+      bead,
+      runPath: join(root, ".gis", "run"),
+      verifyCommand: "npm test",
+      paneId: "pane-gis-vst.6",
+      candidate: DEFAULT_CONFIG.profiles.implement[0],
+      config: DEFAULT_CONFIG,
+      idleReadinessFallbackMs: 1,
+      herdr: {
+        async agentStart(options) {
+          calls.push("start");
+          started = true;
+          return {
+            type: "agent_started",
+            agent: {
+              pane_id: options.paneId,
+              workspace_id: "workspace-gis-vst.6",
+              tab_id: "tab-gis-vst.6",
+              agent_status: "idle",
+            },
+            argv: [],
+          };
+        },
+        async apiSnapshot() {
+          calls.push("snapshot");
+          return {
+            type: "session_snapshot",
+            snapshot: {
+              version: "0.7.5",
+              protocol: 17,
+              workspaces: [],
+              tabs: [],
+              panes: [],
+              layouts: [],
+              agents: started ? [{
+                agent: "codex",
+                name: bead.id,
+                pane_id: "pane-gis-vst.6",
+                workspace_id: "workspace-gis-vst.6",
+                tab_id: "tab-gis-vst.6",
+                agent_status: "idle",
+                launch_pending: true,
+                state_change_seq: 11,
+              }] : [],
+            },
+          };
+        },
+        async agentPrompt() {
+          calls.push("prompt");
+          return {
+            type: "agent_prompted",
+            agent: {
+              pane_id: "pane-gis-vst.6",
+              workspace_id: "workspace-gis-vst.6",
+              tab_id: "tab-gis-vst.6",
+              agent_status: "working",
+            },
+          };
+        },
+      },
+    });
+
+    assert.deepEqual(calls, ["snapshot", "start", "snapshot", "snapshot", "prompt"]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("restarts the idle fallback window when the agent state sequence changes", async () => {
+  const root = await mkdtemp(join(tmpdir(), "gis-worker-idle-sequence-"));
+  const calls = [];
+  let started = false;
+  let readySnapshots = 0;
+  try {
+    await startWorker({
+      bead,
+      runPath: join(root, ".gis", "run"),
+      verifyCommand: "npm test",
+      paneId: "pane-gis-vst.6",
+      candidate: DEFAULT_CONFIG.profiles.implement[0],
+      config: DEFAULT_CONFIG,
+      idleReadinessFallbackMs: 1,
+      herdr: {
+        async agentStart(options) {
+          calls.push("start");
+          started = true;
+          return {
+            type: "agent_started",
+            agent: {
+              pane_id: options.paneId,
+              workspace_id: "workspace-gis-vst.6",
+              tab_id: "tab-gis-vst.6",
+              agent_status: "idle",
+            },
+            argv: [],
+          };
+        },
+        async apiSnapshot() {
+          calls.push("snapshot");
+          if (started) readySnapshots += 1;
+          return {
+            type: "session_snapshot",
+            snapshot: {
+              version: "0.7.5",
+              protocol: 17,
+              workspaces: [],
+              tabs: [],
+              panes: [],
+              layouts: [],
+              agents: started ? [{
+                agent: "codex",
+                name: bead.id,
+                pane_id: "pane-gis-vst.6",
+                workspace_id: "workspace-gis-vst.6",
+                tab_id: "tab-gis-vst.6",
+                agent_status: "idle",
+                launch_pending: true,
+                state_change_seq: readySnapshots === 1 ? 11 : 12,
+              }] : [],
+            },
+          };
+        },
+        async agentPrompt() {
+          calls.push("prompt");
+          return {
+            type: "agent_prompted",
+            agent: {
+              pane_id: "pane-gis-vst.6",
+              workspace_id: "workspace-gis-vst.6",
+              tab_id: "tab-gis-vst.6",
+              agent_status: "working",
+            },
+          };
+        },
+      },
+    });
+
+    assert.deepEqual(calls, [
+      "snapshot",
+      "start",
+      "snapshot",
+      "snapshot",
+      "snapshot",
+      "prompt",
+    ]);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

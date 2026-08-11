@@ -212,3 +212,21 @@ test("destroys an unresponsive per-request socket at its deadline", async () => 
     );
   });
 });
+
+test("destroys an unresponsive agent.wait socket at its requested deadline", async () => {
+  await withHerdrSocket(async () => {
+    // Deliberately leave the wait unanswered. Both Herdr and the client use this deadline.
+  }, async (socketPath, requests) => {
+    const herdr = new HerdrAdapter({ socketPath });
+    await assert.rejects(
+      herdr.agentWait("gis-vst.4", { until: ["done"], timeoutMs: 10 }),
+      (error) => error instanceof HerdrConnectionError &&
+        error.message.includes("timed out after 10ms"),
+    );
+    assert.deepEqual(requests[0].params, {
+      target: "gis-vst.4",
+      until: ["done"],
+      timeout_ms: 10,
+    });
+  });
+});
