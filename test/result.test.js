@@ -3,7 +3,11 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { parseWorkerResult, readWorkerResult } from '../dist/result.js';
+import {
+  parseWorkerResult,
+  readWorkerResult,
+  workerResultProblemDetail,
+} from '../dist/result.js';
 
 test('classifies successful and failed worker results', () => {
   assert.deepEqual(
@@ -20,6 +24,28 @@ test('classifies successful and failed worker results', () => {
       result: { status: 'failed', summary: 'tests failed' },
     },
   );
+});
+
+test('formats every worker result problem through an exhaustive switch', () => {
+  const problems = [
+    [{ kind: 'failure', result: { summary: 'tests failed' } }, 'tests failed'],
+    [
+      { kind: 'invalid_schema', issues: ['missing summary'] },
+      'missing summary',
+    ],
+    [{ kind: 'invalid_json', message: 'bad JSON' }, 'bad JSON'],
+    [
+      { kind: 'stale', path: '/tmp/stale.json' },
+      'result file belongs to another run: /tmp/stale.json',
+    ],
+    [
+      { kind: 'missing', path: '/tmp/missing.json' },
+      'result file is missing: /tmp/missing.json',
+    ],
+  ];
+  for (const [problem, expected] of problems) {
+    assert.equal(workerResultProblemDetail(problem), expected);
+  }
 });
 test('classifies needs_human separately from worker success or failure', () => {
   const state = parseWorkerResult(

@@ -10,6 +10,10 @@ import {
   reviewAgentName,
   startReviewer,
 } from '../dist/review.js';
+import {
+  requestedChangesFeedback,
+  reviewProblemDetail,
+} from '../dist/review-loop.js';
 import { runForegroundLoop } from '../dist/run.js';
 
 const bead = {
@@ -98,6 +102,55 @@ test('parses reviewer verdicts and rejects malformed review results', () => {
     parseReviewResult('{"status":"done","summary":"missing verdict"}').kind,
     'invalid_schema',
   );
+});
+
+test('classifies every non-success review result without nested conditionals', () => {
+  assert.equal(
+    requestedChangesFeedback({
+      kind: 'changes_requested',
+      result: {
+        status: 'done',
+        summary: 'summary fallback',
+        verdict: 'changes_requested',
+        feedback: '  concrete finding  ',
+      },
+    }),
+    'concrete finding',
+  );
+  assert.equal(
+    requestedChangesFeedback({
+      kind: 'changes_requested',
+      result: {
+        status: 'done',
+        summary: 'summary fallback',
+        verdict: 'changes_requested',
+      },
+    }),
+    'summary fallback',
+  );
+
+  const problems = [
+    [
+      { kind: 'failure', result: { summary: 'failed review' } },
+      'failed review',
+    ],
+    [
+      { kind: 'invalid_schema', issues: ['missing verdict'] },
+      'missing verdict',
+    ],
+    [{ kind: 'invalid_json', message: 'bad JSON' }, 'bad JSON'],
+    [
+      { kind: 'stale', path: '/tmp/stale.json' },
+      'result file belongs to another run: /tmp/stale.json',
+    ],
+    [
+      { kind: 'missing', path: '/tmp/missing.json' },
+      'result file is missing: /tmp/missing.json',
+    ],
+  ];
+  for (const [problem, expected] of problems) {
+    assert.equal(reviewProblemDetail(problem), expected);
+  }
 });
 
 test('starts review in a split pane and prefers a different kind', async () => {
