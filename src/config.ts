@@ -337,11 +337,10 @@ export async function readConfig(cwd: string = process.cwd()): Promise<string> {
 
 export async function loadConfig(
   cwd: string = process.cwd(),
-  warn: ConfigWarningSink = (message) => console.warn(message),
+  _warn: ConfigWarningSink = (message) => console.warn(message),
 ): Promise<GisConfig> {
-  const config = parseConfig(await readConfig(cwd));
-  if (config.review) {
-    warn('review=true is not implemented yet');
-  }
-  return config;
+  // Review is a supported execution stage. Keep the warning callback in the
+  // public signature for callers that use it for their own diagnostics, but
+  // do not emit the old "not implemented" warning anymore.
+  return parseConfig(await readConfig(cwd));
 }

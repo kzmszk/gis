@@ -27,6 +27,7 @@ import {
 import type { WorktreeLifecycleSource } from './worktree.js';
 import {
   startWorker,
+  promptWorker,
   herdrAgentName,
   type StartWorkerOptions,
   type StartedWorker,
@@ -34,6 +35,13 @@ import {
   type WorkerStartupSource,
   WorkerStartupError,
 } from './worker.js';
+import {
+  readReviewResult,
+  startReviewer,
+  promptReviewer,
+  type ReviewHerdrSource,
+} from './review.js';
+import type { ProfileCandidate } from './config.js';
 
 export interface RunBeadsSource {
   ready(): Promise<readonly Bead[]>;
@@ -47,7 +55,10 @@ export interface RunBeadsSource {
 export type RunHerdrSource = WorktreeLifecycleSource &
   WorkerStartupSource &
   WorkerPromptSource &
-  BlockedHerdrSource;
+  BlockedHerdrSource & {
+    /** Herdr pane.split is required only when review=true. */
+    paneSplit?: ReviewHerdrSource['paneSplit'];
+  };
 
 export interface RunWorktreeSource {
   create(options: CreateBeadWorktreeOptions): Promise<BeadWorktree>;
@@ -399,6 +410,7 @@ export async function runForegroundLoop(
 
     let started: StartedWorker | undefined;
     let workerKind: string | undefined;
+    let implementationCandidate: ProfileCandidate | undefined;
     try {
       const selection = await startWithProfileFallback(
         bead,
@@ -424,6 +436,7 @@ export async function runForegroundLoop(
       );
       started = selection.result;
       workerKind = selection.candidate.kind;
+      implementationCandidate = selection.candidate;
     } catch (error: unknown) {
       const phase =
         error instanceof WorkerStartupError ? error.phase : 'startup';
@@ -547,6 +560,250 @@ export async function runForegroundLoop(
       });
       if (verification.status === 'blocked') {
         return { status: 'blocked' };
+      }
+
+      if (config.review) {
+        if (herdr.paneSplit === undefined) {
+          report(
+            `gis: reviewer startup failed for ${bead.id}: Herdr pane.split is unavailable`,
+          );
+          await beads.markBlocked(bead.id, await currentHandoff());
+          return { status: 'blocked' };
+        }
+
+        let reviewer: Awaited<ReturnType<typeof startReviewer>>;
+        try {
+          reviewer = await startReviewer({
+            bead,
+            worktreePath: worktree.path,
+            runPath: worktree.runPath,
+            implementationPaneId: worktree.paneId,
+            workspaceId: worktree.workspaceId,
+            implementationKind: workerKind!,
+            implementationCandidate,
+            config,
+            herdr: herdr as ReviewHerdrSource,
+          });
+        } catch (error: unknown) {
+          report(
+            `gis: reviewer startup failed for ${bead.id}: ${errorMessage(error)}`,
+          );
+          await beads.markBlocked(bead.id, await currentHandoff());
+          return { status: 'blocked' };
+        }
+
+        if (reviewer.selection.candidate.kind === workerKind) {
+          report(
+            `gis: reviewer kind fallback for ${bead.id}: implementation and reviewer both use ${workerKind}; review continues in the fallback kind`,
+          );
+        }
+
+        const currentReviewerTranscriptPath = async (): Promise<string> => {
+          try {
+            const session = await findWorkerSession(
+              reviewer.selection.result,
+              reviewer.agentName,
+              herdr,
+            );
+            if (session === undefined) {
+              return defaultTranscriptPath(
+                reviewer.selection.candidate.kind,
+                worktree.path,
+              );
+            }
+            return (
+              (await resolveTranscript(session, worktree.path)) ??
+              defaultTranscriptPath(
+                reviewer.selection.candidate.kind,
+                worktree.path,
+              )
+            );
+          } catch {
+            return defaultTranscriptPath(
+              reviewer.selection.candidate.kind,
+              worktree.path,
+            );
+          }
+        };
+        const currentReviewerHandoff =
+          async (): Promise<BeadHandoffLocations> =>
+            handoff(worktree, await currentReviewerTranscriptPath());
+
+        let reviewRound = 1;
+        let reviewFeedback: string | undefined;
+        let reviewPrompt = reviewer.selection.result.prompt;
+        const reviewerWaitOptions = {
+          ...waitOptions,
+          target: reviewer.agentName,
+          transcriptPath: defaultTranscriptPath(
+            reviewer.selection.candidate.kind,
+            worktree.path,
+          ),
+          resolveTranscriptPath: currentReviewerTranscriptPath,
+        };
+
+        while (true) {
+          let reviewerWait: AgentWaitHandlingResult;
+          try {
+            reviewerWait = await blocked.wait(reviewerWaitOptions);
+          } catch (error: unknown) {
+            report(
+              `gis: reviewer wait failed for ${bead.id}: ${errorMessage(error)}`,
+            );
+            await beads.markBlocked(bead.id, await currentReviewerHandoff());
+            return { status: 'blocked' };
+          }
+          if (reviewerWait.status === 'blocked') {
+            return { status: 'blocked' };
+          }
+
+          const reviewResult = await waitForCurrentResult(
+            reviewPrompt.resultPath,
+            reviewPrompt.runId,
+            config.blocked_timeout,
+          ).catch((error: unknown) => {
+            report(
+              `gis: reviewer result read failed for ${bead.id}: ${errorMessage(error)}`,
+            );
+            return undefined;
+          });
+          if (reviewResult === undefined) {
+            await beads.markBlocked(bead.id, await currentReviewerHandoff());
+            return { status: 'blocked' };
+          }
+
+          // The review result uses a stricter verdict schema than the worker
+          // result, while preserving the same run-id/stale-file safeguards.
+          const parsedReview =
+            reviewResult.kind === 'missing' || reviewResult.kind === 'stale'
+              ? reviewResult
+              : await readReviewResult(
+                  reviewPrompt.resultPath,
+                  reviewPrompt.runId,
+                );
+          if (parsedReview.kind === 'needs_human') {
+            const locations = await currentReviewerHandoff();
+            await beads.markBlocked(bead.id, locations);
+            try {
+              const gate = await beads.createHumanGate({
+                issueId: bead.id,
+                reason: parsedReview.reason,
+                locations,
+              });
+              humanFromWorkers.set(gate.id, gate);
+              notifyHumanBeads(
+                new Map([[gate.id, gate]]),
+                locations.worktreePath,
+              );
+              return { status: 'human' };
+            } catch {
+              return { status: 'blocked' };
+            }
+          }
+          if (parsedReview.kind === 'success') {
+            break;
+          }
+
+          const feedback =
+            parsedReview.kind === 'changes_requested'
+              ? parsedReview.result.feedback?.trim() ||
+                parsedReview.result.summary
+              : parsedReview.kind === 'failure'
+                ? parsedReview.result.summary
+                : parsedReview.kind === 'invalid_schema'
+                  ? parsedReview.issues.join('; ')
+                  : parsedReview.kind === 'invalid_json'
+                    ? parsedReview.message
+                    : parsedReview.kind === 'stale'
+                      ? `result file belongs to another run: ${parsedReview.path}`
+                      : `result file is missing: ${parsedReview.path}`;
+
+          if (parsedReview.kind !== 'changes_requested') {
+            report(
+              `gis: reviewer result ${parsedReview.kind} for ${bead.id}: ${feedback}`,
+            );
+            await beads.markBlocked(bead.id, await currentReviewerHandoff());
+            return { status: 'blocked' };
+          }
+
+          if (reviewRound >= config.review_max) {
+            const locations = await currentReviewerHandoff();
+            const reason = [
+              `review_max=${config.review_max} reached after reviewer requested changes`,
+              `reviewer feedback: ${feedback}`,
+              `inspect the implementation at ${locations.worktreePath}`,
+              `review round files are under ${locations.roundLogPath}`,
+            ].join('; ');
+            await beads.markBlocked(bead.id, locations);
+            try {
+              const gate = await beads.createHumanGate({
+                issueId: bead.id,
+                reason,
+                locations,
+              });
+              humanFromWorkers.set(gate.id, gate);
+              notifyHumanBeads(
+                new Map([[gate.id, gate]]),
+                locations.worktreePath,
+              );
+              return { status: 'human' };
+            } catch {
+              return { status: 'blocked' };
+            }
+          }
+
+          reviewFeedback = feedback;
+          report(
+            `gis: reviewer requested changes for ${bead.id}; returning to implementation agent ${agentName}`,
+          );
+          await promptWorker({
+            bead,
+            runPath: worktree.runPath,
+            verifyCommand: config.verify,
+            round: reviewRound + 1,
+            reviewFeedback,
+            target: agentName,
+            herdr,
+          });
+          const implementationRetry = await blocked.wait(waitOptions);
+          if (implementationRetry.status === 'blocked') {
+            throw new AlreadyBlockedError(implementationRetry.bead ?? bead);
+          }
+
+          const retryVerification = await verify.verify({
+            bead,
+            worktreePath: worktree.path,
+            runPath: worktree.runPath,
+            transcriptPath: await currentTranscriptPath(),
+            resolveTranscriptPath: currentTranscriptPath,
+            config,
+            beads,
+            target: agentName,
+            herdr,
+            waitForWorker: async () => {
+              const retry = await blocked.wait(waitOptions);
+              if (retry.status === 'blocked') {
+                throw new AlreadyBlockedError(retry.bead ?? bead);
+              }
+            },
+          });
+          if (retryVerification.status === 'blocked') {
+            return { status: 'blocked' };
+          }
+
+          reviewRound += 1;
+          const prompted = await promptReviewer({
+            bead,
+            runPath: worktree.runPath,
+            verifyCommand: config.verify,
+            target: reviewer.agentName,
+            round: reviewRound,
+            implementationKind: workerKind!,
+            feedback: reviewFeedback,
+            herdr,
+          });
+          reviewPrompt = prompted.prompt;
+        }
       }
 
       const finalTranscriptPath = await currentTranscriptPath();

@@ -16,6 +16,10 @@ export interface CandidateSelectionOptions {
   readonly excludeKinds?: readonly string[] | ReadonlySet<string>;
   /** Return false to stop fallback and surface this startup error immediately. */
   readonly shouldFallback?: (error: unknown) => boolean;
+  /** Explicit candidate order for pipeline stages such as review. */
+  readonly candidateOrder?: readonly ProfileCandidate[];
+  /** Explicit pipeline profile when the bead's task profile is not relevant. */
+  readonly profile?: ProfileName;
 }
 
 export interface ProfileStartResult<T> {
@@ -127,7 +131,7 @@ export function resolveProfileCandidate(
   config: Pick<GisConfig, 'profiles' | 'kinds'>,
   options: CandidateSelectionOptions = {},
 ): ProfileCandidate {
-  const profile = resolveProfileName(bead);
+  const profile = options.profile ?? resolveProfileName(bead);
   return selectProfileCandidate(config.profiles[profile], {
     ...options,
     availableKinds: options.availableKinds ?? config.kinds,
@@ -188,7 +192,7 @@ export async function startWithProfileFallback<T>(
   options: CandidateSelectionOptions = {},
 ): Promise<ProfileStartResult<T>> {
   const profile = resolveProfileName(bead);
-  const candidates = config.profiles[profile];
+  const candidates = options.candidateOrder ?? config.profiles[profile];
   let attempts = 0;
   let lastError: unknown;
   let hasError = false;

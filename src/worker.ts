@@ -35,6 +35,12 @@ export interface WorkerPromptOptions {
   readonly round?: number;
   /** Verification output that the worker should address on a retry. */
   readonly verificationFeedback?: string;
+  /** Prompt role. Implementation is the default for backwards compatibility. */
+  readonly role?: 'implement' | 'review';
+  /** Kind used by the implementation worker when this is a review prompt. */
+  readonly implementationKind?: string;
+  /** Review findings to address on a subsequent review round. */
+  readonly reviewFeedback?: string;
 }
 
 export interface WorkerPrompt {
@@ -77,6 +83,8 @@ export interface StartWorkerOptions extends WorkerPromptOptions {
   /** Test seam for Herdr versions that leave an otherwise-idle agent launch-pending. */
   readonly idleReadinessFallbackMs?: number;
 }
+
+export type WorkerRole = 'implement' | 'review';
 
 export interface StartedWorker {
   readonly prompt: WorkerPrompt;
@@ -155,12 +163,65 @@ function verificationFeedback(value: string | undefined): string[] {
   ];
 }
 
+function reviewFeedback(
+  value: string | undefined,
+  role: WorkerRole = 'review',
+): string[] {
+  if (value === undefined || value.trim().length === 0) {
+    return [];
+  }
+
+  return [
+    '## Previous review findings',
+    '',
+    value.trim(),
+    '',
+    role === 'implement'
+      ? 'Address the findings above, run verification, and write the implementation result.'
+      : 'Re-check the implementation after the requested fixes and write a new review result.',
+    '',
+  ];
+}
+
 function promptContent(
   options: WorkerPromptOptions,
   resultRelativePath: string,
   runId: string,
 ): string {
   const { bead } = options;
+  const role: WorkerRole = options.role ?? 'implement';
+  if (role === 'review') {
+    return [
+      '# gis reviewer task',
+      '',
+      `- Bead ID: \`${bead.id}\``,
+      `- Run ID: \`${runId}\``,
+      `- Implementation agent kind: \`${options.implementationKind ?? 'unknown'}\``,
+      '',
+      '## Task',
+      '',
+      'Review the implementation currently checked out in this worktree against the task and acceptance criteria.',
+      'Do not modify files and do not commit changes. Inspect the diff and relevant tests carefully.',
+      '',
+      bead.description.trim(),
+      '',
+      '## Acceptance criteria',
+      '',
+      acceptanceCriteria(bead.acceptance_criteria),
+      '',
+      '## Verification',
+      '',
+      `Run this command while reviewing: \`${options.verifyCommand}\``,
+      '',
+      ...reviewFeedback(options.reviewFeedback),
+      '## Result file',
+      '',
+      `Before finishing, write a JSON result to \`${resultRelativePath}\`.`,
+      `The object must contain \`run_id\` exactly equal to \`${runId}\`, \`status\` (\`done\` or \`failed\`), a concise \`summary\`, and \`verdict\` (\`approved\` or \`changes_requested\`).`,
+      'For changes_requested, include a concrete `feedback` string describing every required fix. Use `needs_human` if a human decision is required.',
+      '',
+    ].join('\n');
+  }
   return [
     '# gis worker task',
     '',
@@ -193,6 +254,7 @@ function promptContent(
     'Do not push the branch, and do not run `bd dolt push`.',
     'Do not close, reopen, or otherwise change the Bead status; GIS owns task-state transitions.',
     '',
+    ...reviewFeedback(options.reviewFeedback, 'implement'),
     ...verificationFeedback(options.verificationFeedback),
     '## Result file',
     '',
@@ -214,9 +276,14 @@ export async function writeWorkerPrompt(
   requireNonEmpty(options.verifyCommand, 'verifyCommand');
 
   const round = roundNumber(options.round);
-  const resultRelativePath = `.gis/run/round-${round}-impl.json`;
+  const role: WorkerRole = options.role ?? 'implement';
+  const resultSuffix = role === 'review' ? 'review' : 'impl';
+  const resultRelativePath = `.gis/run/round-${round}-${resultSuffix}.json`;
   const path = join(options.runPath, 'prompt.md');
-  const resultPath = join(options.runPath, `round-${round}-impl.json`);
+  const resultPath = join(
+    options.runPath,
+    `round-${round}-${resultSuffix}.json`,
+  );
   const runId = randomUUID();
   const content = promptContent(options, resultRelativePath, runId);
 

@@ -101,7 +101,7 @@ test('rejects malformed TOML and invalid settings', () => {
   }
 });
 
-test('warns at load time when review is enabled', async () => {
+test('loads review mode without the old not-implemented warning', async () => {
   const warnings = [];
   await withConfig('review = true\n', async (directory) => {
     const config = await loadConfig(directory, (message) =>
@@ -109,7 +109,7 @@ test('warns at load time when review is enabled', async () => {
     );
     assert.equal(config.review, true);
   });
-  assert.deepEqual(warnings, ['review=true is not implemented yet']);
+  assert.deepEqual(warnings, []);
 });
 
 test('fails the gis run startup when the config is invalid', async () => {
