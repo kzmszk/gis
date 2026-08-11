@@ -4,3 +4,12 @@
 *.db
 .beads-credential-key
 .beads/proxieddb/
+
+# gis runtime artifacts
+.gis/run/
+
+# Node.js dependencies
+node_modules/
+
+# TypeScript build output
+dist/

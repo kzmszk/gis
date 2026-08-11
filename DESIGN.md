@@ -40,14 +40,25 @@ beads で管理されたチケットを、git worktree で分離された複数�
 ワーカーは herdr のペインの中で**対話モードのまま**動く。gis は herdr の socket API 経由で操作する。
 
 ```
-herdr worktree create --branch <bead-id> --base main
-herdr agent start <name> --kind <claude|codex|pi> --pane <id>
+herdr worktree create --cwd <repo> --path <repo>/.worktrees/<bead-id> --branch <bead-id> --base main
+herdr agent start <name> --kind <claude|codex|pi> --pane <id> --timeout 300000
 herdr agent prompt <name> "Read .gis/prompt.md and execute it."
 herdr agent wait <name> --until done --until blocked
 herdr agent read <name> --lines N
 herdr api snapshot
 herdr worktree remove
 ```
+
+`worktree.create`にはorchestratorのrepository cwdと絶対checkout pathを必ず渡し、
+Herdr UIで現在focusされているworkspaceへ依存しない。`agent.start`はHerdrの上限と同じ最大300秒、
+その応答後も`session.snapshot`で対象paneに同名runnerが登録され、
+runner kindと起動前より新しいstate changeを持ち、`interactive_ready=true`になるまで
+同じ起動時間枠内で待ってから最初のpromptを送る。Herdr 0.7.5が入力可能なCodexを
+`launch_pending=true`のまま残す場合は、完全一致したagentのidle状態が30秒継続した
+場合だけreadiness fallbackとし、`state_change_seq`が変われば安定時間を数え直す。
+prompt後は`working`への状態遷移を
+Herdrに確認させ、updater等に入力が吸われた場合は再送せずblockedにする。各API失敗時は
+worktree/start/promptのフェーズとHerdrのエラー内容を表示してからblockedへ移す。
 
 herdr は claude / codex / pi を一級市民として認識し、`working / blocked / done` の状態検知を提供する。
 この状態検知を gis が自前で実装する必要はない。
@@ -130,9 +141,10 @@ bd ready --exclude-label human
       ※ この中の verify 失敗は verify カウンタを消費しない
 
   [マージ] 直列キューに投入
-      1本ずつ main に rebase → verify を再実行 → 通れば merge
+      1本ずつ main に rebase → base より先の commit があることを確認
+      → verify を再実行 → 通れば merge
 
-  成功         → bd close → worktree と pane を破棄
+  成功         → bd close → worktree と pane を破棄 → 統合済み bead branch を削除
   上限超過/blocked → bd を blocked にし、worktree と pane は保持したまま人間へ通知
 ```
 
@@ -167,6 +179,12 @@ verify は無料（数十秒の CPU）、レビューは有料（サブスク枠
 
 個別に通ったブランチ同士が合流すると壊れる、というのが並列開発の主要な失敗モードである。
 これは**捨ててはいけない複雑さ**（Gas Town の Refinery が存在する理由もここ）。
+ワーカーには、Beads の保守的な既定表示より当該 task の明示的な commit 権限が
+優先すること、当該 branch で task 完了に必要な commit は許可するが push はしないこと、
+pre-commit hook は迂回せず、formatter/lint が変更または拒否した場合は再 stage・再 verify・
+再 commit すること、clean な worktree で完了報告することを指示する。
+Bead の status 遷移は GIS が所有してワーカー自身には変更させない。マージキューでも
+`base..HEAD` が空でないことを検証する。変更ゼロのブランチを成功扱いして bead を close しない。
 
 ---
 
@@ -287,6 +305,8 @@ Claude と ChatGPT のサブスク枠は別建てなので実質的に分離さ�
 - herdr で通知し、**ペインはそのまま残す**。人間がアタッチして手で解く
 - **定型返答の自動投入は絶対にしない。** 承認プロンプトに自動で yes を返す仕組みは、事故が起きたときに誰も止められない
 - `blocked_timeout` 経過後も blocked なら撤退し、bead を `blocked` にする
+- done / blocked のどちらも返さないワーカーは `worker_timeout` で打ち切り、worktree を保持して blocked にする
+- verify コマンドは `verify_timeout` で打ち切る。ハングした検証を無期限に待たない
 
 ### worktree は成功時にしか破棄しない
 
@@ -300,7 +320,14 @@ claude / codex は既に cwd ごとに完全な JSONL トランスクリプト�
 - `~/.claude/projects/<cwd-slug>/*.jsonl`
 - `~/.codex/sessions/<year>/...`
 
-worktree ごとに cwd が違うので自動的に分離される。
+worktree ごとに cwd が違うので自動的に分離される。ただし、同じ worktree で複数セッションが
+動く可能性があるため、更新日時だけでは対応関係を決めない。herdr が agent ごとに報告する
+`agent_session`（`id` または `path`）から対象 JSONL を特定し、session ID と Codex の
+`session_meta.cwd` も一致することを確認する。最終的な索引作成時には同じ pane の live snapshot
+を優先し、snapshot を取得できない場合だけ起動・prompt 応答の参照を使う。同じ ID と cwd に
+一致する候補が複数ある場合やsession参照を取得できない場合は別セッションを推測せず、索引を
+`unresolved` として残す。
+
 **gis が残すのは「どの bead が、どの worktree で、どのトランスクリプトに対応するか」という索引だけ。**
 
 ### ラウンドの応酬は worktree 内に番号付きで残す
@@ -335,7 +362,8 @@ herdr api snapshot  ×  git worktree list  ×  bd list --status=in_progress
 
 | 状態 | 対応 |
 |---|---|
-| in_progress だがペインが無い | bead を open に戻す |
+| in_progress だがペインも worktree も無い | bead を open に戻す |
+| in_progress で worktree は残るがペインが無い | 実在する worktree パスを記録して bead を blocked にする |
 | ペインはあるが対応する bead が無い | 人間に報告して放置 |
 
 揮発的状態を永続していないため、単純な集合演算で済む。
@@ -350,10 +378,21 @@ beads の依存グラフをそのまま使う。gis 側の実装は
 「`bd ready --exclude-label human` を引く」の1箇所だけ。
 
 ```
-[bead A] ──┐
-[bead B] ──┼──> [ゲート bead (label: human)] ──> [後続 bead D, E]
-[bead C] ──┘         ↑ gis は絶対に触らない        ↑ bd ready に現れない
+[source A/B/C] ──(blocked handoff, edge is replaced)──┐
+                                                      ├──> [後続 bead D, E]
+[ゲート bead (label: human)] ──────────────────────────┘
+          ↑ gis は絶対に触らない                       ↑ bd ready に現れない
 ```
+
+ここで `needs_human` を返した source は handoff のため `blocked` になる。
+したがって gis は gate を source の依存先にはしない（blocked source に
+gate を依存させると通常の `bd human respond` が gate を close できず、
+グラフがデッドロックする）。source を直接 blocker とする既存の後続 bead
+があれば、gis は `gate -> 後続` の edge を先に追加してから
+`source -> 後続` の edge を外す。source 自体は blocked のまま worktree と
+handoff を保持し、human が gate に応答して close した時点で後続だけが
+`bd ready` に現れる。source を参照する edge が無い場合も、gate は独立した
+human checkpoint として作成され、後から gate を依存先にした後続を止める。
 
 1. `--exclude-label human` により、ゲート bead は**ディスパッチ対象から構造的に除外される**
 2. 後続は依存でブロックされ、`bd ready` に現れない。gis は存在すら知らない
@@ -400,6 +439,8 @@ mol / formula を捨てたので素の依存関係で足りる。
 N 件マージ / M 件 blocked / K 件が人間の確認待ち
 ```
 
+`K` は今回作成したものに限らず、リポジトリ内に残っている open な human bead の総数。
+
 一回の実行が一つの完結した単位になり、**なぜ止まったかが必ず提示される**。
 ready があるうちは走り続けるので、依存グラフは自動的に前進する
 （`bd close` した瞬間に依存先のブロックが外れ、次のループで拾われる）。
@@ -421,6 +462,8 @@ review = false                   # 段階2で true
 verify_max = 5
 review_max = 3
 blocked_timeout = "15m"
+worker_timeout = "1h"
+verify_timeout = "15m"
 claude_permission_mode = "auto"  # 使えなければ "acceptEdits"
 
 # --- モデルプロファイル（第5章）: 順序付き候補リスト、先頭優先 ---
