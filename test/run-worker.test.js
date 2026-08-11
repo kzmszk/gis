@@ -1,0 +1,183 @@
+import assert from 'node:assert/strict';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { test } from 'node:test';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { createBeadJobProcessor } from '../dist/run-worker.js';
+
+const config = {
+  base: 'main',
+  verify: 'npm test',
+  kinds: ['codex'],
+  review: false,
+  verify_max: 2,
+  review_max: 1,
+  blocked_timeout: '1s',
+  worker_timeout: '1h',
+  verify_timeout: '15m',
+  claude_permission_mode: 'auto',
+  profiles: {
+    plan: [{ kind: 'codex', model: 'plan', effort: 'low' }],
+    implement: [{ kind: 'codex', model: 'implement', effort: 'low' }],
+    review: [{ kind: 'codex', model: 'review', effort: 'low' }],
+  },
+};
+
+test('retains an intended handoff when worktree creation fails', async () => {
+  const issue = {
+    id: 'gis-vst.worktree-failure',
+    title: 'worktree failure',
+    description: 'retain the failed worktree handoff',
+    status: 'open',
+    priority: 2,
+    issue_type: 'task',
+  };
+  const blocked = [];
+  const root = '/tmp/gis-run-worker-boundary';
+  const processor = createBeadJobProcessor({
+    cwd: root,
+    config,
+    beads: {
+      async dispatch() {
+        throw new Error('dispatch must not run');
+      },
+      async markBlocked(id, locations) {
+        blocked.push([id, locations]);
+        return { ...issue, status: 'blocked' };
+      },
+      async createHumanGate() {
+        throw new Error('human gate must not run');
+      },
+    },
+    herdr: {},
+    worktrees: {
+      async create() {
+        throw new Error('git worktree add failed');
+      },
+    },
+    workers: {},
+    blocked: {},
+    verify: {},
+    merge: {},
+    resolveTranscript: async () => undefined,
+    report: () => undefined,
+    onHumanGate: () => undefined,
+  });
+
+  assert.deepEqual(await processor(issue), { status: 'blocked' });
+  assert.deepEqual(blocked, [
+    [
+      issue.id,
+      {
+        worktreePath: `${root}/.worktrees/${issue.id}`,
+        roundLogPath: `${root}/.worktrees/${issue.id}/.gis/run`,
+        transcriptPath:
+          `${root}/.worktrees/${issue.id}/.gis/run/` +
+          'transcript-unknown.unresolved',
+      },
+    ],
+  ]);
+});
+
+test('worker service owns result handling and emits a human outcome at its boundary', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'gis-run-worker-'));
+  const issue = {
+    id: 'gis-vst.worker-boundary',
+    title: 'worker boundary',
+    description: 'inspect the worker boundary',
+    status: 'open',
+    priority: 2,
+    issue_type: 'task',
+  };
+  const resultPath = join(root, 'result.json');
+  const gate = {
+    ...issue,
+    id: 'gis-vst.human-boundary',
+    status: 'open',
+    labels: ['human'],
+  };
+  const calls = [];
+
+  await writeFile(
+    resultPath,
+    JSON.stringify({
+      status: 'failed',
+      summary: 'waiting for a decision',
+      needs_human: 'choose the migration strategy',
+    }),
+  );
+
+  try {
+    const processor = createBeadJobProcessor({
+      cwd: root,
+      config,
+      beads: {
+        async dispatch(id, kind) {
+          calls.push(['dispatch', id, kind]);
+          return { ...issue, status: 'in_progress' };
+        },
+        async markBlocked(id, locations) {
+          calls.push(['blocked', id, locations]);
+          return { ...issue, status: 'blocked' };
+        },
+        async createHumanGate(request) {
+          calls.push(['gate', request]);
+          return gate;
+        },
+      },
+      herdr: {},
+      worktrees: {
+        async create() {
+          return {
+            beadId: issue.id,
+            path: join(root, 'worktree'),
+            runPath: join(root, 'worktree', '.gis', 'run'),
+            workspaceId: 'workspace',
+            paneId: 'pane',
+            async remove() {},
+          };
+        },
+      },
+      workers: {
+        async start() {
+          return {
+            prompt: { resultPath },
+            started: {},
+            prompted: {},
+          };
+        },
+      },
+      blocked: {
+        async wait() {
+          return { status: 'done', wasBlocked: false, worktreeRetained: true };
+        },
+      },
+      verify: {
+        async verify() {
+          throw new Error('verification must not run for a human result');
+        },
+      },
+      merge: {
+        async enqueue() {
+          throw new Error('merge must not run for a human result');
+        },
+      },
+      resolveTranscript: async () => undefined,
+      report: () => undefined,
+      onHumanGate: (createdGate, locations) => {
+        calls.push(['human-callback', createdGate, locations]);
+      },
+    });
+
+    const outcome = await processor(issue);
+
+    assert.deepEqual(outcome, { status: 'human' });
+    assert.equal(calls[0][0], 'dispatch');
+    assert.equal(calls[1][0], 'blocked');
+    assert.equal(calls[2][0], 'gate');
+    assert.equal(calls[3][0], 'human-callback');
+    assert.equal(calls[3][1].id, gate.id);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
