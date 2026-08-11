@@ -14,6 +14,8 @@ export interface WorktreeLifecycleSource {
   worktreeCreate(options: {
     readonly branch: string;
     readonly base: string;
+    readonly cwd: string;
+    readonly path: string;
   }): Promise<WorktreeCreatedResult>;
   worktreeRemove(
     workspaceId: string,
@@ -63,11 +65,14 @@ export async function createBeadWorktree(
   requireNonEmpty(options.config.base, "config.base");
 
   const herdr = options.herdr ?? defaultHerdr();
+  const cwd = resolve(options.cwd ?? process.cwd());
+  const requestedPath = resolve(cwd, ".worktrees", options.bead.id);
   const created = await herdr.worktreeCreate({
     branch: options.bead.id,
     base: options.config.base,
+    cwd,
+    path: requestedPath,
   });
-  const cwd = options.cwd ?? process.cwd();
   const path = resolve(cwd, created.worktree.path);
   const runPath = join(path, ".gis", "run");
 

@@ -40,14 +40,19 @@ beads で管理されたチケットを、git worktree で分離された複数�
 ワーカーは herdr のペインの中で**対話モードのまま**動く。gis は herdr の socket API 経由で操作する。
 
 ```
-herdr worktree create --branch <bead-id> --base main
-herdr agent start <name> --kind <claude|codex|pi> --pane <id>
+herdr worktree create --cwd <repo> --path <repo>/.worktrees/<bead-id> --branch <bead-id> --base main
+herdr agent start <name> --kind <claude|codex|pi> --pane <id> --timeout 30000
 herdr agent prompt <name> "Read .gis/prompt.md and execute it."
 herdr agent wait <name> --until done --until blocked
 herdr agent read <name> --lines N
 herdr api snapshot
 herdr worktree remove
 ```
+
+`worktree.create`にはorchestratorのrepository cwdと絶対checkout pathを必ず渡し、
+Herdr UIで現在focusされているworkspaceへ依存しない。`agent.start`は最大30秒、
+runnerがinteractive-readyになるまで待ってから最初のpromptを送る。各API失敗時は
+worktree/start/promptのフェーズとHerdrのエラー内容を表示してからblockedへ移す。
 
 herdr は claude / codex / pi を一級市民として認識し、`working / blocked / done` の状態検知を提供する。
 この状態検知を gis が自前で実装する必要はない。

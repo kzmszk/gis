@@ -155,6 +155,7 @@ test("dispatches ready work within concurrency and refetches newly unblocked wor
 test("blocks a bead when worktree creation fails without rejecting the run", async () => {
   const source = bead("gis-vst.worktree-failure");
   const blocked = [];
+  const reports = [];
   let firstReady = true;
   const result = await runForegroundLoop({
     cwd: "/repo",
@@ -183,7 +184,7 @@ test("blocks a bead when worktree creation fails without rejecting the run", asy
         throw new Error("worktree create failed");
       },
     },
-    report: () => undefined,
+    report: (message) => reports.push(message),
   });
 
   assert.equal(result.merged, 0);
@@ -196,6 +197,50 @@ test("blocks a bead when worktree creation fails without rejecting the run", asy
       transcriptPath: "/repo/.worktrees/gis-vst.worktree-failure/.gis/run/transcript-unknown.unresolved",
     },
   }]);
+  assert.match(reports.join("\n"),
+    /worktree creation failed for gis-vst\.worktree-failure: worktree create failed/);
+});
+
+test("reports the worker phase and cause when prompting fails", async () => {
+  const resultRoot = await mkdtemp(join(tmpdir(), "gis-run-prompt-failure-"));
+  const source = bead("gis-vst.prompt-failure");
+  const reports = [];
+  let ready = true;
+
+  try {
+    const result = await runForegroundLoop({
+      config: config({ concurrency: 1 }),
+      beads: {
+        async ready() {
+          if (!ready) return [];
+          ready = false;
+          return [source];
+        },
+        async dispatch() {
+          return { ...source, status: "in_progress" };
+        },
+        async markBlocked() {
+          return { ...source, status: "blocked" };
+        },
+        async createHumanGate() {
+          throw new Error("human gate must not be created");
+        },
+      },
+      worktrees: dependencies(resultRoot).worktrees,
+      workers: {
+        async start() {
+          throw new WorkerStartupError("prompt", new Error("agent not interactive-ready"));
+        },
+      },
+      report: (message) => reports.push(message),
+    });
+
+    assert.equal(result.blocked, 1);
+    assert.match(reports.join("\n"),
+      /worker prompt failed for gis-vst\.prompt-failure:.*agent not interactive-ready/);
+  } finally {
+    await rm(resultRoot, { recursive: true, force: true });
+  }
 });
 
 test("contains a job whose recovery write fails and lets concurrent work finish", async () => {

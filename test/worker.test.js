@@ -94,6 +94,7 @@ test("starts the worker after writing prompt.md and injects exactly one TUI line
             "-s",
             "workspace-write",
           ],
+          timeoutMs: 30_000,
         },
       },
       { type: "prompt", target: "gis-vst.6", text: WORKER_PROMPT },

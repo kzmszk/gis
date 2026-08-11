@@ -8,11 +8,12 @@ import {
   type HerdrClient,
   type AgentStartOptions,
 } from "./herdr.js";
-import type { GisConfig, ProfileCandidate } from "./config.js";
+import { parseDurationMs, type GisConfig, type ProfileCandidate } from "./config.js";
 import { buildAgentStartArgs } from "./profiles.js";
 
 /** The only text that gis injects into a worker's interactive TUI. */
 export const WORKER_PROMPT = "Read .gis/run/prompt.md and execute it.";
+const MAX_AGENT_START_TIMEOUT_MS = 30_000;
 
 export interface WorkerPromptOptions {
   readonly bead: Pick<Bead, "id" | "description" | "acceptance_criteria">;
@@ -53,7 +54,7 @@ export interface PromptWorkerOptions extends WorkerPromptOptions {
 export interface StartWorkerOptions extends WorkerPromptOptions {
   readonly paneId: string;
   readonly candidate: ProfileCandidate;
-  readonly config: Pick<GisConfig, "claude_permission_mode">;
+  readonly config: Pick<GisConfig, "claude_permission_mode" | "worker_timeout">;
   readonly herdr?: WorkerStartupSource;
 }
 
@@ -193,6 +194,10 @@ export async function startWorker(options: StartWorkerOptions): Promise<StartedW
       kind: options.candidate.kind,
       paneId: options.paneId,
       args: buildAgentStartArgs(options.candidate, options.config),
+      timeoutMs: Math.min(
+        parseDurationMs(options.config.worker_timeout, "worker_timeout"),
+        MAX_AGENT_START_TIMEOUT_MS,
+      ),
     });
   } catch (error: unknown) {
     throw new WorkerStartupError("start", error);

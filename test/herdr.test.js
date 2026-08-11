@@ -131,6 +131,7 @@ test("runs the worktree and agent lifecycle over herdr's socket API", async () =
       kind: "codex",
       paneId: worktree.root_pane.pane_id,
       args: ["-m", "gpt-5.6-luna"],
+      timeoutMs: 30_000,
     });
     await herdr.agentPrompt("gis-vst.4", "Read .gis/run/prompt.md and execute it.");
     const wait = await herdr.agentWait("gis-vst.4");
@@ -152,6 +153,13 @@ test("runs the worktree and agent lifecycle over herdr's socket API", async () =
       "worktree.remove",
     ]);
     assert.deepEqual(requests[0].params, { branch: "gis-vst.4", base: "main" });
+    assert.deepEqual(requests[1].params, {
+      name: "gis-vst.4",
+      kind: "codex",
+      pane_id: "pane-1",
+      args: ["-m", "gpt-5.6-luna"],
+      timeout_ms: 30_000,
+    });
     assert.deepEqual(requests[3].params, { target: "gis-vst.4", until: ["done", "blocked"] });
     assert.deepEqual(requests[4].params, {
       target: "gis-vst.4",

@@ -150,6 +150,10 @@ function summaryText(merged: number, blocked: number, humanWaiting: number): str
   return `${merged}件マージ / ${blocked}件 blocked / ${humanWaiting}件が人間の確認待ち`;
 }
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 function agentSession(agent: AgentInfo | undefined): AgentSessionInfo | undefined {
   return agent?.agent_session ?? undefined;
 }
@@ -243,6 +247,7 @@ export async function runForegroundLoop(options: RunOptions = {}): Promise<RunSu
     try {
       worktree = await worktrees.create({ bead, config, cwd, herdr });
     } catch (error: unknown) {
+      report(`gis: worktree creation failed for ${bead.id}: ${errorMessage(error)}`);
       // There is no worktree to retain when creation itself fails. Still
       // persist a deterministic intended handoff so the bead cannot vanish
       // from the run with an in-progress status.
@@ -284,6 +289,8 @@ export async function runForegroundLoop(options: RunOptions = {}): Promise<RunSu
       started = selection.result;
       workerKind = selection.candidate.kind;
     } catch (error: unknown) {
+      const phase = error instanceof WorkerStartupError ? error.phase : "startup";
+      report(`gis: worker ${phase} failed for ${bead.id}: ${errorMessage(error)}`);
       const transcriptPath = defaultTranscriptPath(workerKind ?? "unknown", worktree.path);
       await beads.markBlocked(bead.id, handoff(worktree, transcriptPath));
       return { status: "blocked" };

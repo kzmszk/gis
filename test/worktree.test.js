@@ -70,8 +70,18 @@ test("creates an independent worktree and its .gis/run directory for each bead",
     await access(first.runPath);
     await access(second.runPath);
     assert.deepEqual(created, [
-      { branch: "gis-vst.5", base: "main" },
-      { branch: "gis-vst.6", base: "main" },
+      {
+        branch: "gis-vst.5",
+        base: "main",
+        cwd: root,
+        path: join(root, ".worktrees", "gis-vst.5"),
+      },
+      {
+        branch: "gis-vst.6",
+        base: "main",
+        cwd: root,
+        path: join(root, ".worktrees", "gis-vst.6"),
+      },
     ]);
     assert.deepEqual(removed, []);
   });
