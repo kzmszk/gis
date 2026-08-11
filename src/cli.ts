@@ -4,6 +4,7 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { loadConfig } from './config.js';
 import { reconcileStartup } from './recovery.js';
+import { recoverLateCompletions } from './late-recovery.js';
 import { runForegroundLoop, type RunSummary } from './run.js';
 
 export { readConfig } from './config.js';
@@ -18,7 +19,8 @@ export async function main(args: string[]): Promise<RunSummary> {
   const cwd = process.cwd();
   const config = await loadConfig(cwd);
   await reconcileStartup({ cwd, baseBranch: config.base });
-  return runForegroundLoop({ cwd, config });
+  const recovered = await recoverLateCompletions({ cwd, config });
+  return runForegroundLoop({ cwd, config, initialMerged: recovered });
 }
 
 const isEntryPoint =

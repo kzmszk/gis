@@ -19,6 +19,11 @@ export interface MergeGitSource {
   rebase(worktreePath: string, baseBranch: string): Promise<void>;
   /** Return true only when the bead branch contains a commit ahead of base. */
   hasCommits(worktreePath: string, baseBranch: string): Promise<boolean>;
+  /** List paths changed by bead commits relative to base. */
+  changedPaths?(
+    worktreePath: string,
+    baseBranch: string,
+  ): Promise<readonly string[]>;
   /** Fast-forward the checked-out base worktree with the rebased bead branch. */
   merge(repositoryPath: string, branch: string): Promise<void>;
   /** Remove the integrated bead branch after its worktree has been removed. */
@@ -167,6 +172,23 @@ export class GitMergeAdapter implements MergeGitSource {
     return count > 0;
   }
 
+  async changedPaths(
+    worktreePath: string,
+    baseBranch: string,
+  ): Promise<readonly string[]> {
+    const stdout = await this.run([
+      '-C',
+      worktreePath,
+      'diff',
+      '--name-only',
+      `${baseBranch}..HEAD`,
+    ]);
+    return stdout
+      .split('\n')
+      .map((path) => path.trim())
+      .filter(Boolean);
+  }
+
   merge(repositoryPath: string, branch: string): Promise<void> {
     requireNonEmpty(repositoryPath, 'repositoryPath');
     requireNonEmpty(branch, 'branch');
@@ -272,6 +294,23 @@ export class SerialMergeQueue {
           handoff,
           'commit',
           new Error('bead branch has no commit ahead of base'),
+        );
+      }
+      const changedPaths = await this.git.changedPaths?.(
+        item.worktree.path,
+        this.options.baseBranch,
+      );
+      const runtimeArtifacts = changedPaths?.filter((path) =>
+        path.startsWith('.gis/run/'),
+      );
+      if (runtimeArtifacts !== undefined && runtimeArtifacts.length > 0) {
+        return this.blocked(
+          item,
+          handoff,
+          'commit',
+          new Error(
+            `bead commits contain GIS runtime artifacts: ${runtimeArtifacts.join(', ')}`,
+          ),
         );
       }
     } catch (error: unknown) {

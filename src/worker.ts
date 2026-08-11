@@ -1,4 +1,5 @@
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import type { Bead } from './beads.js';
 import {
@@ -23,6 +24,8 @@ const MIN_AGENT_START_TIMEOUT_MS = 3_000;
 const AGENT_READY_POLL_MS = 50;
 const IDLE_READINESS_FALLBACK_MS = 30_000;
 const PROMPT_ACCEPT_TIMEOUT_MS = 10_000;
+const HERDR_AGENT_NAME_MAX_LENGTH = 32;
+const HERDR_AGENT_NAME_PATTERN = /^[a-z][a-z0-9_-]{0,31}$/;
 
 export interface WorkerPromptOptions {
   readonly bead: Pick<Bead, 'id' | 'description' | 'acceptance_criteria'>;
@@ -38,6 +41,7 @@ export interface WorkerPrompt {
   readonly path: string;
   readonly resultPath: string;
   readonly resultRelativePath: string;
+  readonly runId: string;
   readonly content: string;
 }
 
@@ -65,6 +69,7 @@ export interface PromptWorkerOptions extends WorkerPromptOptions {
 }
 
 export interface StartWorkerOptions extends WorkerPromptOptions {
+  readonly agentName: string;
   readonly paneId: string;
   readonly candidate: ProfileCandidate;
   readonly config: Pick<GisConfig, 'claude_permission_mode' | 'worker_timeout'>;
@@ -103,6 +108,26 @@ function requireNonEmpty(value: string, name: string): void {
   }
 }
 
+/** Map an arbitrary Bead ID to a stable, collision-resistant Herdr agent name. */
+export function herdrAgentName(beadId: string): string {
+  requireNonEmpty(beadId, 'beadId');
+  const source = beadId.trim();
+  if (HERDR_AGENT_NAME_PATTERN.test(source)) {
+    return source;
+  }
+
+  const hash = createHash('sha256').update(source).digest('hex').slice(0, 8);
+  const baseLimit = HERDR_AGENT_NAME_MAX_LENGTH - hash.length - 1;
+  const normalized = source
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/^[^a-z]+/, '')
+    .slice(0, baseLimit)
+    .replace(/[-_]+$/, '');
+  const base = normalized.length === 0 ? 'bead' : normalized;
+  return `${base}-${hash}`;
+}
+
 function roundNumber(value: number | undefined): number {
   const round = value ?? 1;
   if (!Number.isSafeInteger(round) || round <= 0) {
@@ -133,12 +158,14 @@ function verificationFeedback(value: string | undefined): string[] {
 function promptContent(
   options: WorkerPromptOptions,
   resultRelativePath: string,
+  runId: string,
 ): string {
   const { bead } = options;
   return [
     '# gis worker task',
     '',
     `- Bead ID: \`${bead.id}\``,
+    `- Run ID: \`${runId}\``,
     '',
     '## Task',
     '',
@@ -161,6 +188,8 @@ function promptContent(
     'If a pre-commit hook modifies files or rejects a commit, inspect its output and changes, restage the intended changes, rerun verification, and retry the commit.',
     'Do not report done when the branch has no commit ahead of the configured base.',
     'Before reporting completion, confirm `git status --porcelain` is empty.',
+    'Files under `.gis/run/` are GIS runtime artifacts: never stage or commit them, even with `git add -f`.',
+    'Ignored `.gis/run/` files do not count against the clean-worktree requirement.',
     'Do not push the branch, and do not run `bd dolt push`.',
     'Do not close, reopen, or otherwise change the Bead status; GIS owns task-state transitions.',
     '',
@@ -168,7 +197,8 @@ function promptContent(
     '## Result file',
     '',
     `Before finishing, write a JSON result to \`${resultRelativePath}\`.`,
-    'The object must contain `status` (`done` or `failed`) and a concise `summary`.',
+    `The object must contain \`run_id\` exactly equal to \`${runId}\`, \`status\` (\`done\` or \`failed\`), and a concise \`summary\`.`,
+    'Write this result only after the task commit and final verification have succeeded.',
     'If a human must decide or intervene, also include `needs_human` with the reason.',
     '',
   ].join('\n');
@@ -187,11 +217,13 @@ export async function writeWorkerPrompt(
   const resultRelativePath = `.gis/run/round-${round}-impl.json`;
   const path = join(options.runPath, 'prompt.md');
   const resultPath = join(options.runPath, `round-${round}-impl.json`);
-  const content = promptContent(options, resultRelativePath);
+  const runId = randomUUID();
+  const content = promptContent(options, resultRelativePath, runId);
 
   await mkdir(options.runPath, { recursive: true });
+  await rm(resultPath, { force: true });
   await writeFile(path, content, 'utf8');
-  return { path, resultPath, resultRelativePath, content };
+  return { path, resultPath, resultRelativePath, runId, content };
 }
 
 function defaultHerdr(): WorkerStartupSource {
@@ -263,7 +295,14 @@ async function waitForNamedAgentReady(
       agent.agent === kind &&
       typeof stateChangeSeq === 'number' &&
       stateChangeSeq > previousStateChangeSeq;
-    if (matchesStartedAgent && agent.interactive_ready === true) {
+    const launchIsSettled =
+      agent?.agent_status === 'idle' || agent?.agent_status === 'done';
+    if (
+      matchesStartedAgent &&
+      agent.interactive_ready === true &&
+      agent.launch_pending !== true &&
+      launchIsSettled
+    ) {
       return;
     }
 
@@ -316,6 +355,10 @@ export async function promptWorker(
 export async function startWorker(
   options: StartWorkerOptions,
 ): Promise<StartedWorker> {
+  requireNonEmpty(options.agentName, 'agentName');
+  if (!HERDR_AGENT_NAME_PATTERN.test(options.agentName)) {
+    throw new TypeError('agentName must be a valid Herdr agent name');
+  }
   requireNonEmpty(options.paneId, 'paneId');
   requireNonEmpty(options.candidate.kind, 'candidate.kind');
   const idleFallbackMs =
@@ -348,7 +391,7 @@ export async function startWorker(
     const beforeStart = await beforeDeadline(
       herdr.apiSnapshot(remainingTime(deadline)),
       deadline,
-      `capturing agent ${options.bead.id} pre-start snapshot`,
+      `capturing agent ${options.agentName} pre-start snapshot`,
     );
     const previousAgent = beforeStart.snapshot.agents.find(
       (agent) => agent.pane_id === options.paneId,
@@ -363,14 +406,14 @@ export async function startWorker(
     }
     started = await beforeDeadline(
       herdr.agentStart({
-        name: options.bead.id,
+        name: options.agentName,
         kind: options.candidate.kind,
         paneId: options.paneId,
         args: buildAgentStartArgs(options.candidate, options.config),
         timeoutMs: agentStartTimeoutMs,
       }),
       deadline,
-      `starting agent ${options.bead.id}`,
+      `starting agent ${options.agentName}`,
     );
   } catch (error: unknown) {
     throw new WorkerStartupError('start', error);
@@ -380,7 +423,7 @@ export async function startWorker(
     await waitForNamedAgentReady(
       herdr,
       options.paneId,
-      options.bead.id,
+      options.agentName,
       options.candidate.kind,
       previousStateChangeSeq,
       deadline,
@@ -394,16 +437,16 @@ export async function startWorker(
   try {
     const promptTimeoutMs = remainingTime(deadline);
     if (promptTimeoutMs === 0) {
-      throw new Error(`prompting agent ${options.bead.id} timed out`);
+      throw new Error(`prompting agent ${options.agentName} timed out`);
     }
     prompted = await beforeDeadline(
       herdr.agentPrompt(
-        options.bead.id,
+        options.agentName,
         WORKER_PROMPT,
         promptAcceptanceOptions(promptTimeoutMs),
       ),
       deadline,
-      `prompting agent ${options.bead.id}`,
+      `prompting agent ${options.agentName}`,
     );
   } catch (error: unknown) {
     throw new WorkerStartupError('prompt', error);

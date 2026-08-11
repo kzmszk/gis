@@ -7,6 +7,7 @@ import { DEFAULT_CONFIG } from '../dist/config.js';
 import {
   WORKER_PROMPT,
   WorkerStartupError,
+  herdrAgentName,
   startWorker,
   writeWorkerPrompt,
 } from '../dist/worker.js';
@@ -18,6 +19,7 @@ const bead = {
   acceptance_criteria:
     'The prompt file contains the task and the TUI receives one line.',
 };
+const agentName = herdrAgentName(bead.id);
 
 const paneId = 'pane-gis-vst.6';
 const workspaceId = 'workspace-gis-vst.6';
@@ -26,11 +28,11 @@ const tabId = 'tab-gis-vst.6';
 function agent(overrides = {}) {
   return {
     agent: 'codex',
-    name: bead.id,
+    name: agentName,
     pane_id: paneId,
     workspace_id: workspaceId,
     tab_id: tabId,
-    agent_status: 'working',
+    agent_status: 'done',
     ...overrides,
   };
 }
@@ -65,6 +67,7 @@ function promptedAgent(overrides = {}) {
 function startOptions(root, overrides = {}) {
   return {
     bead,
+    agentName,
     runPath: join(root, '.gis', 'run'),
     verifyCommand: 'npm test',
     paneId,
@@ -91,6 +94,7 @@ test('writes the detailed worker instructions and result protocol to prompt.md',
     );
     assert.equal(await readFile(prompt.path, 'utf8'), prompt.content);
     assert.match(prompt.content, /gis-vst\.6/);
+    assert.match(prompt.content, /Run ID: `[0-9a-f-]+`/);
     assert.match(prompt.content, /The prompt file contains the task/);
     assert.match(prompt.content, /npm test && npm run lint/);
     assert.match(prompt.content, /\.gis\/run\/round-2-impl\.json/);
@@ -112,6 +116,11 @@ test('writes the detailed worker instructions and result protocol to prompt.md',
       /restage the intended changes, rerun verification, and retry the commit/,
     );
     assert.match(prompt.content, /git status --porcelain.*empty/);
+    assert.match(prompt.content, /never stage or commit them/);
+    assert.match(
+      prompt.content,
+      /Write this result only after the task commit/,
+    );
     assert.match(prompt.content, /Do not push the branch/);
     assert.match(prompt.content, /GIS owns task-state transitions/);
   } finally {
@@ -160,7 +169,7 @@ test('starts the worker after writing prompt.md and injects exactly one TUI line
       ['snapshot', 'start', 'snapshot', 'prompt'],
     );
     assert.deepEqual(calls[1].options, {
-      name: 'gis-vst.6',
+      name: agentName,
       kind: 'codex',
       paneId: 'pane-gis-vst.6',
       args: [
@@ -177,7 +186,7 @@ test('starts the worker after writing prompt.md and injects exactly one TUI line
     });
     assert.ok(calls[1].options.timeoutMs >= 299_000);
     assert.ok(calls[1].options.timeoutMs <= 300_000);
-    assert.equal(calls[3].target, 'gis-vst.6');
+    assert.equal(calls[3].target, agentName);
     assert.equal(calls[3].text, WORKER_PROMPT);
     assert.deepEqual(calls[3].options.wait.until, ['working']);
     assert.ok(calls[3].options.wait.timeoutMs >= 299_000);
@@ -189,7 +198,19 @@ test('starts the worker after writing prompt.md and injects exactly one TUI line
   }
 });
 
-test('waits for the named agent in the target pane to become interactive-ready', async () => {
+test('maps hierarchical Bead IDs to valid collision-resistant agent names', () => {
+  assert.equal(herdrAgentName('gis-vst'), 'gis-vst');
+  const hierarchical = herdrAgentName('kv-537.1');
+  assert.match(hierarchical, /^[a-z][a-z0-9_-]{0,31}$/);
+  assert.notEqual(hierarchical, herdrAgentName('kv-537-1'));
+  assert.notEqual(herdrAgentName('A.B'), herdrAgentName('a-b'));
+  assert.match(
+    herdrAgentName('123.' + 'very-long-invalid-id'.repeat(4)),
+    /^[a-z][a-z0-9_-]{0,31}$/,
+  );
+});
+
+test('waits for launch activity to settle after interactive readiness', async () => {
   const root = await mkdtemp(join(tmpdir(), 'gis-worker-ready-'));
   const calls = [];
   let snapshots = 0;
@@ -204,13 +225,11 @@ test('waits for the named agent in the target pane to become interactive-ready',
           async apiSnapshot() {
             calls.push('snapshot');
             snapshots += 1;
-            const kind = snapshots === 2 ? 'claude' : 'codex';
-            const stateChangeSeq = snapshots === 1 ? 10 : 11;
             return snapshot([
               agent({
-                agent: kind,
                 interactive_ready: true,
-                state_change_seq: stateChangeSeq,
+                state_change_seq: snapshots === 1 ? 10 : snapshots + 9,
+                agent_status: snapshots === 2 ? 'working' : 'done',
               }),
             ]);
           },

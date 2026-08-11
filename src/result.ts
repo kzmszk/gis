@@ -29,6 +29,12 @@ export type ResultFileState =
       readonly path: string;
     }
   | {
+      readonly kind: 'stale';
+      readonly path: string;
+      readonly expectedRunId: string;
+      readonly actualRunId?: string;
+    }
+  | {
       readonly kind: 'invalid_json';
       readonly path: string;
       readonly message: string;
@@ -110,7 +116,10 @@ export function parseWorkerResult(
 }
 
 /** Read and classify the result file written by a worker. */
-export async function readWorkerResult(path: string): Promise<ResultFileState> {
+export async function readWorkerResult(
+  path: string,
+  expectedRunId?: string,
+): Promise<ResultFileState> {
   requirePath(path);
 
   let contents: string;
@@ -127,5 +136,23 @@ export async function readWorkerResult(path: string): Promise<ResultFileState> {
     throw error;
   }
 
-  return parseWorkerResult(contents, path);
+  const parsed = parseWorkerResult(contents, path);
+  if (
+    expectedRunId !== undefined &&
+    (parsed.kind === 'success' ||
+      parsed.kind === 'failure' ||
+      parsed.kind === 'needs_human') &&
+    parsed.result.run_id !== expectedRunId
+  ) {
+    return {
+      kind: 'stale',
+      path,
+      expectedRunId,
+      actualRunId:
+        typeof parsed.result.run_id === 'string'
+          ? parsed.result.run_id
+          : undefined,
+    };
+  }
+  return parsed;
 }
