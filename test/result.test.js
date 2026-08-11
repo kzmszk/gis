@@ -99,3 +99,23 @@ test('parseWorkerResult preserves valid extra fields for later protocol extensio
   assert.equal(state.kind, 'success');
   assert.equal(state.result.verdict, 'pass');
 });
+
+test('rejects a result from another worker run', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'gis-result-stale-'));
+  const path = join(root, 'result.json');
+  try {
+    await writeFile(
+      path,
+      '{"run_id":"old-run","status":"done","summary":"old"}',
+      'utf8',
+    );
+    assert.deepEqual(await readWorkerResult(path, 'current-run'), {
+      kind: 'stale',
+      path,
+      expectedRunId: 'current-run',
+      actualRunId: 'old-run',
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

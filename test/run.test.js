@@ -4,6 +4,7 @@ import { test } from 'node:test';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { formatRunSummary, runForegroundLoop } from '../dist/run.js';
+import { formatHumanGateNotification } from '../dist/run.js';
 import { WorkerStartupError } from '../dist/worker.js';
 
 const bead = (id, priority = 2, issueType = 'task') => ({
@@ -496,8 +497,11 @@ test('falls back only after a runner start failure and records the selected kind
 test('does not dispatch an epic and reports existing human gates', async () => {
   const calls = [];
   const human = { ...bead('gis-vst.human'), labels: ['human'] };
+  let humanPolls = 0;
   const result = await runForegroundLoop({
+    cwd: '/repo',
     config: config({ concurrency: 1 }),
+    humanPollIntervalMs: 1,
     beads: {
       async ready() {
         calls.push('ready');
@@ -511,7 +515,8 @@ test('does not dispatch an epic and reports existing human gates', async () => {
         throw new Error('no bead should be blocked');
       },
       async listHuman() {
-        return [human];
+        humanPolls += 1;
+        return humanPolls === 1 ? [human] : [];
       },
     },
     report: (message) => calls.push(`summary:${message}`),
@@ -519,10 +524,18 @@ test('does not dispatch an epic and reports existing human gates', async () => {
 
   assert.equal(result.merged, 0);
   assert.equal(result.blocked, 0);
-  assert.equal(result.humanWaiting, 1);
+  assert.equal(result.humanWaiting, 0);
   assert.deepEqual(calls, [
     'ready',
-    'summary:0件マージ / 0件 blocked / 1件が人間の確認待ち',
+    'summary:gis: 人間の確認が必要です\n' +
+      '  gis-vst.human: gis-vst.human\n' +
+      '    作業場所: /repo\n' +
+      '    確認内容: implement gis-vst.human\n' +
+      '    回答: bd close gis-vst.human --reason "Responded: 確認結果をここに記入"\n' +
+      '  回答後: GISが自動的に続行します',
+    'ready',
+    'ready',
+    'summary:0件マージ / 0件 blocked / 0件が人間の確認待ち',
   ]);
 });
 
@@ -533,6 +546,7 @@ test('creates a human gate in the run loop when the worker requests confirmation
   const gate = { ...bead('gis-vst.human-22'), labels: ['human'] };
   const gates = [];
   const calls = [];
+  let humanPolls = 0;
   let transcriptResolutions = 0;
   await writeFile(
     join(resultRoot, 'gis-vst.22.json'),
@@ -546,6 +560,7 @@ test('creates a human gate in the run loop when the worker requests confirmation
   try {
     const result = await runForegroundLoop({
       config: config({ concurrency: 1 }),
+      humanPollIntervalMs: 1,
       beads: {
         async ready() {
           return gates.length === 0 ? [source] : [];
@@ -564,7 +579,8 @@ test('creates a human gate in the run loop when the worker requests confirmation
           return gate;
         },
         async listHuman() {
-          return gates;
+          humanPolls += 1;
+          return humanPolls === 1 ? gates : [];
         },
       },
       worktrees,
@@ -613,7 +629,7 @@ test('creates a human gate in the run loop when the worker requests confirmation
 
     assert.equal(result.merged, 0);
     assert.equal(result.blocked, 0);
-    assert.equal(result.humanWaiting, 1);
+    assert.equal(result.humanWaiting, 0);
     assert.equal(calls[0][0], 'dispatch');
     assert.equal(calls[1][0], 'blocked');
     assert.equal(calls[2][0], 'gate');
@@ -624,7 +640,7 @@ test('creates a human gate in the run loop when the worker requests confirmation
       '/home/kazu/.codex/sessions/current.jsonl',
     );
     assert.equal(transcriptResolutions, 1);
-    assert.match(calls.at(-1)[1], /1件が人間の確認待ち/);
+    assert.match(calls.at(-1)[1], /0件が人間の確認待ち/);
   } finally {
     await rm(resultRoot, { recursive: true, force: true });
   }
@@ -889,6 +905,7 @@ test('allows a human response to release rewired dependents while the source sta
   let gateOpen = false;
   let firstRun = true;
   let dependentMerged = false;
+  let humanPolls = 0;
   const dispatched = [];
 
   await Promise.all([
@@ -926,33 +943,18 @@ test('allows a human response to release rewired dependents while the source sta
       return gate;
     },
     async listHuman() {
-      return gateOpen ? [gate] : [];
+      if (!gateOpen) return [];
+      humanPolls += 1;
+      if (humanPolls === 1) return [gate];
+      gateOpen = false;
+      return [];
     },
   };
 
   try {
-    const waiting = await runForegroundLoop({
+    const result = await runForegroundLoop({
       config: config({ concurrency: 1 }),
-      beads,
-      worktrees,
-      workers,
-      blocked: {
-        async wait() {
-          return { status: 'done', wasBlocked: false, worktreeRetained: true };
-        },
-      },
-      report: () => undefined,
-    });
-
-    assert.equal(waiting.merged, 0);
-    assert.equal(waiting.blocked, 0);
-    assert.equal(waiting.humanWaiting, 1);
-
-    // This is the state change performed by `bd human respond`: the gate is
-    // closed, while the source remains blocked with its handoff worktree.
-    gateOpen = false;
-    const resumed = await runForegroundLoop({
-      config: config({ concurrency: 1 }),
+      humanPollIntervalMs: 1,
       beads,
       worktrees,
       workers,
@@ -975,9 +977,9 @@ test('allows a human response to release rewired dependents while the source sta
       report: () => undefined,
     });
 
-    assert.equal(resumed.merged, 1);
-    assert.equal(resumed.blocked, 0);
-    assert.equal(resumed.humanWaiting, 0);
+    assert.equal(result.merged, 1);
+    assert.equal(result.blocked, 0);
+    assert.equal(result.humanWaiting, 0);
     assert.deepEqual(
       dispatched.map(({ id }) => id),
       [source.id, dependent.id],
@@ -990,8 +992,10 @@ test('allows a human response to release rewired dependents while the source sta
 test('does not dispatch a human-labelled bead even if a source returns it', async () => {
   const calls = [];
   const gate = { ...bead('gis-vst.human-23'), labels: ['human'] };
+  let humanPolls = 0;
   const result = await runForegroundLoop({
     config: config({ concurrency: 1 }),
+    humanPollIntervalMs: 1,
     beads: {
       async ready() {
         return [gate];
@@ -1007,18 +1011,131 @@ test('does not dispatch a human-labelled bead even if a source returns it', asyn
         throw new Error('human gate must not create another gate');
       },
       async listHuman() {
-        return [gate];
+        humanPolls += 1;
+        return humanPolls === 1 ? [gate] : [];
       },
     },
   });
 
-  assert.equal(result.humanWaiting, 1);
+  assert.equal(result.humanWaiting, 0);
   assert.deepEqual(calls, []);
+});
+
+test('waits for a matching late result after an apparent done state', async () => {
+  const issue = bead('gis-vst.late');
+  const root = await mkdtemp(join(tmpdir(), 'gis-run-late-result-'));
+  const resultPath = join(root, 'result.json');
+  let ready = true;
+  let merged = false;
+  try {
+    await writeFile(
+      resultPath,
+      '{"run_id":"old","status":"done","summary":"stale"}',
+      'utf8',
+    );
+    const result = await runForegroundLoop({
+      config: config({ concurrency: 1, blocked_timeout: '500ms' }),
+      beads: {
+        async ready() {
+          if (!ready) return [];
+          ready = false;
+          return [issue];
+        },
+        async dispatch() {
+          return { ...issue, status: 'in_progress' };
+        },
+        async markBlocked() {
+          throw new Error('late result must not be blocked');
+        },
+        async createHumanGate() {
+          throw new Error('unused');
+        },
+        async listHuman() {
+          return [];
+        },
+      },
+      worktrees: {
+        async create() {
+          return {
+            beadId: issue.id,
+            path: root,
+            runPath: join(root, '.gis', 'run'),
+            workspaceId: 'ws-late',
+            paneId: 'pane-late',
+            async remove() {},
+          };
+        },
+      },
+      workers: {
+        async start() {
+          setTimeout(() => {
+            void writeFile(
+              resultPath,
+              '{"run_id":"current","status":"done","summary":"late success"}',
+              'utf8',
+            );
+          }, 25);
+          return {
+            prompt: { resultPath, runId: 'current' },
+            started: {},
+            prompted: {},
+          };
+        },
+      },
+      blocked: {
+        async wait() {
+          return { status: 'done', wasBlocked: false, worktreeRetained: true };
+        },
+      },
+      verify: {
+        async verify() {
+          return { status: 'verified', attempts: 1, result: { passed: true } };
+        },
+      },
+      merge: {
+        async enqueue() {
+          merged = true;
+          return { status: 'merged', bead: { ...issue, status: 'closed' } };
+        },
+      },
+      herdr: {},
+      report: () => undefined,
+    });
+
+    assert.equal(result.merged, 1);
+    assert.equal(result.blocked, 0);
+    assert.equal(merged, true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('formats the required completion summary', () => {
   assert.equal(
     formatRunSummary({ merged: 2, blocked: 1, humanWaiting: 3 }),
     '2件マージ / 1件 blocked / 3件が人間の確認待ち',
+  );
+});
+
+test('formats actionable details for human gates', () => {
+  assert.equal(
+    formatHumanGateNotification(
+      [
+        {
+          id: 'gis-vst.human-2',
+          title: 'Review visual output',
+          description: 'Open demo/index.html and compare docs/spec.md.',
+          acceptance_criteria: 'Confirm animation,\ninteraction, and FPS.',
+        },
+      ],
+      '/repo',
+    ),
+    'gis: 人間の確認が必要です\n' +
+      '  gis-vst.human-2: Review visual output\n' +
+      '    作業場所: /repo\n' +
+      '    開くファイル: /repo/demo/index.html, /repo/docs/spec.md\n' +
+      '    確認内容: Confirm animation, interaction, and FPS.\n' +
+      '    回答: bd close gis-vst.human-2 --reason "Responded: 確認結果をここに記入"\n' +
+      '  回答後: GISが自動的に続行します',
   );
 });

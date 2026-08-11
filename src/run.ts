@@ -2,7 +2,7 @@ import { join, resolve } from 'node:path';
 import type { Bead, BeadHandoffLocations, HumanGateRequest } from './beads.js';
 import { createBeadsAdapter } from './beads.js';
 import type { GisConfig } from './config.js';
-import { loadConfig } from './config.js';
+import { loadConfig, parseDurationMs } from './config.js';
 import { createHerdrAdapter } from './herdr.js';
 import type { AgentInfo, AgentSessionInfo } from './herdr.js';
 import {
@@ -27,6 +27,7 @@ import {
 import type { WorktreeLifecycleSource } from './worktree.js';
 import {
   startWorker,
+  herdrAgentName,
   type StartWorkerOptions,
   type StartedWorker,
   type WorkerPromptSource,
@@ -87,6 +88,10 @@ export interface RunOptions {
     worktreePath: string,
   ) => Promise<string | undefined>;
   readonly report?: (message: string) => void;
+  /** Successful merges completed by startup recovery before this loop. */
+  readonly initialMerged?: number;
+  /** Test seam for polling externally-resolved human checkpoints. */
+  readonly humanPollIntervalMs?: number;
 }
 
 export interface RunSummary {
@@ -94,6 +99,54 @@ export interface RunSummary {
   readonly blocked: number;
   readonly humanWaiting: number;
   readonly text: string;
+}
+
+function singleLine(value: string): string {
+  return value.replace(/\s+/g, ' ').trim();
+}
+
+function referencedFiles(
+  bead: Pick<Bead, 'description' | 'acceptance_criteria'>,
+  repositoryPath: string,
+): string[] {
+  const text = `${bead.description}\n${bead.acceptance_criteria ?? ''}`;
+  const matches = text.match(
+    /(?:[A-Za-z0-9_.-]+\/)*[A-Za-z0-9_.-]+\.(?:html?|md|txt|pdf|png|jpe?g|gif|svg|json|csv|ts|js|mjs|cjs|tsx|jsx|css)/gi,
+  );
+  return [
+    ...new Set((matches ?? []).map((file) => resolve(repositoryPath, file))),
+  ];
+}
+
+/** Format an actionable terminal notification for open human checkpoints. */
+export function formatHumanGateNotification(
+  beads: readonly Pick<
+    Bead,
+    'id' | 'title' | 'description' | 'acceptance_criteria'
+  >[],
+  repositoryPath = process.cwd(),
+): string {
+  const unique = new Map(beads.map((bead) => [bead.id, bead]));
+  const lines = ['gis: 人間の確認が必要です'];
+
+  for (const bead of [...unique.values()].sort((left, right) =>
+    left.id.localeCompare(right.id),
+  )) {
+    const request = singleLine(
+      bead.acceptance_criteria?.trim() || bead.description,
+    );
+    const files = referencedFiles(bead, repositoryPath);
+    lines.push(
+      `  ${bead.id}: ${singleLine(bead.title)}`,
+      `    作業場所: ${repositoryPath}`,
+      ...(files.length > 0 ? [`    開くファイル: ${files.join(', ')}`] : []),
+      `    確認内容: ${request}`,
+      `    回答: bd close ${bead.id} --reason "Responded: 確認結果をここに記入"`,
+    );
+  }
+
+  lines.push('  回答後: GISが自動的に続行します');
+  return lines.join('\n');
 }
 
 type JobOutcome =
@@ -158,6 +211,31 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolvePromise) =>
+    setTimeout(resolvePromise, milliseconds),
+  );
+}
+
+async function waitForCurrentResult(
+  path: string,
+  runId: string | undefined,
+  timeout: string,
+): Promise<ResultFileState> {
+  const deadline = Date.now() + parseDurationMs(timeout, 'blocked_timeout');
+  while (true) {
+    const result = await readWorkerResult(path, runId);
+    if (result.kind !== 'missing' && result.kind !== 'stale') {
+      return result;
+    }
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      return result;
+    }
+    await delay(Math.min(250, remaining));
+  }
+}
+
 function agentSession(
   agent: AgentInfo | undefined,
 ): AgentSessionInfo | undefined {
@@ -166,7 +244,7 @@ function agentSession(
 
 async function findWorkerSession(
   started: StartedWorker,
-  beadId: string,
+  agentName: string,
   herdr: RunHerdrSource,
 ): Promise<AgentSessionInfo | undefined> {
   const direct =
@@ -187,7 +265,7 @@ async function findWorkerSession(
     if (exactPane !== undefined) {
       return agentSession(exactPane);
     }
-    const named = agents.find((agent) => agent.name === beadId);
+    const named = agents.find((agent) => agent.name === agentName);
     return agentSession(named);
   } catch {
     // A captured start/prompt response is only a fallback when live state
@@ -262,11 +340,42 @@ export async function runForegroundLoop(
     options.resolveTranscript ?? resolveAgentSessionTranscript;
   const report = options.report ?? ((message: string) => console.log(message));
   const active = new Map<string, Promise<JobOutcome>>();
-  const humanFromWorkers = new Set<string>();
-  let merged = 0;
+  const humanFromWorkers = new Map<string, Bead>();
+  const notifiedHumanIds = new Set<string>();
+  const humanPollIntervalMs = options.humanPollIntervalMs ?? 1_000;
+  requirePositiveInteger(humanPollIntervalMs, 'humanPollIntervalMs');
+  let merged = options.initialMerged ?? 0;
+  if (!Number.isSafeInteger(merged) || merged < 0) {
+    throw new RangeError('initialMerged must be a non-negative integer');
+  }
   let blockedCount = 0;
+  let waitingForHuman = false;
+
+  const openHumanBeads = async (): Promise<Map<string, Bead>> => {
+    if (beads.listHuman !== undefined) {
+      return new Map(
+        (await beads.listHuman())
+          .filter((bead) => bead.status === 'open')
+          .map((bead) => [bead.id, bead]),
+      );
+    }
+    return new Map(humanFromWorkers);
+  };
+
+  const notifyHumanBeads = (
+    gates: ReadonlyMap<string, Bead>,
+    repositoryPath: string,
+  ): void => {
+    const unnotified = [...gates.values()].filter(
+      (bead) => !notifiedHumanIds.has(bead.id),
+    );
+    if (unnotified.length === 0) return;
+    report(formatHumanGateNotification(unnotified, repositoryPath));
+    for (const bead of unnotified) notifiedHumanIds.add(bead.id);
+  };
 
   const processBead = async (bead: Bead): Promise<JobOutcome> => {
+    const agentName = herdrAgentName(bead.id);
     let worktree: BeadWorktree;
     try {
       worktree = await worktrees.create({ bead, config, cwd, herdr });
@@ -299,6 +408,7 @@ export async function runForegroundLoop(
           await beads.dispatch(bead.id, candidate.kind);
           return workers.start({
             bead,
+            agentName,
             runPath: worktree.runPath,
             verifyCommand: config.verify,
             paneId: worktree.paneId,
@@ -330,7 +440,7 @@ export async function runForegroundLoop(
 
     const currentTranscriptPath = async (): Promise<string> => {
       try {
-        const session = await findWorkerSession(started, bead.id, herdr);
+        const session = await findWorkerSession(started, agentName, herdr);
         if (session === undefined) {
           return defaultTranscriptPath(workerKind!, worktree.path);
         }
@@ -346,7 +456,7 @@ export async function runForegroundLoop(
       handoff(worktree, await currentTranscriptPath());
     const waitOptions = {
       beadId: bead.id,
-      target: bead.id,
+      target: agentName,
       worktreePath: worktree.path,
       roundLogPath: worktree.runPath,
       transcriptPath: defaultTranscriptPath(workerKind!, worktree.path),
@@ -371,7 +481,11 @@ export async function runForegroundLoop(
 
     let result: ResultFileState;
     try {
-      result = await readWorkerResult(started.prompt.resultPath);
+      result = await waitForCurrentResult(
+        started.prompt.resultPath,
+        started.prompt.runId,
+        config.blocked_timeout,
+      );
     } catch (error: unknown) {
       report(
         `gis: worker result read failed for ${bead.id}: ${errorMessage(error)}`,
@@ -389,7 +503,8 @@ export async function runForegroundLoop(
           reason: result.reason,
           locations,
         });
-        humanFromWorkers.add(gate.id);
+        humanFromWorkers.set(gate.id, gate);
+        notifyHumanBeads(new Map([[gate.id, gate]]), locations.worktreePath);
         return { status: 'human' };
       } catch {
         return { status: 'blocked' };
@@ -403,7 +518,9 @@ export async function runForegroundLoop(
             ? result.issues.join('; ')
             : result.kind === 'invalid_json'
               ? result.message
-              : `result file is missing: ${result.path}`;
+              : result.kind === 'stale'
+                ? `result file belongs to another run: ${result.path}`
+                : `result file is missing: ${result.path}`;
       report(`gis: worker result ${result.kind} for ${bead.id}: ${detail}`);
       await beads.markBlocked(bead.id, await currentHandoff());
       return { status: 'blocked' };
@@ -419,7 +536,7 @@ export async function runForegroundLoop(
         resolveTranscriptPath: currentTranscriptPath,
         config,
         beads,
-        target: bead.id,
+        target: agentName,
         herdr,
         waitForWorker: async () => {
           const retry = await blocked.wait(waitOptions);
@@ -489,7 +606,18 @@ export async function runForegroundLoop(
     }
 
     if (active.size === 0) {
-      break;
+      const humanBeads = await openHumanBeads();
+      notifyHumanBeads(humanBeads, cwd);
+      if (humanBeads.size === 0 || beads.listHuman === undefined) {
+        if (waitingForHuman && beads.listHuman !== undefined) {
+          waitingForHuman = false;
+          continue;
+        }
+        break;
+      }
+      waitingForHuman = true;
+      await delay(humanPollIntervalMs);
+      continue;
     }
 
     const completed = await Promise.race(
@@ -506,18 +634,12 @@ export async function runForegroundLoop(
     }
   }
 
-  const humanBeads =
-    beads.listHuman === undefined ? [] : await beads.listHuman();
-  const humanIds = new Set(
-    humanBeads.filter((bead) => bead.status === 'open').map((bead) => bead.id),
-  );
-  for (const id of humanFromWorkers) {
-    humanIds.add(id);
-  }
+  const remainingHumanBeads = await openHumanBeads();
+  notifyHumanBeads(remainingHumanBeads, cwd);
   const summary = {
     merged,
     blocked: blockedCount,
-    humanWaiting: humanIds.size,
+    humanWaiting: remainingHumanBeads.size,
   };
   const result = { ...summary, text: formatRunSummary(summary) };
   report(result.text);

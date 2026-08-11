@@ -308,6 +308,12 @@ export class BeadsAdapter {
     );
   }
 
+  listBlocked(): Promise<Bead[]> {
+    return this.runJson(['list', '--status=blocked', '--json']).then((stdout) =>
+      parseBeadList(stdout, 'bd list --status=blocked'),
+    );
+  }
+
   /** List open human-gated issues for the run completion summary. */
   listHuman(): Promise<Bead[]> {
     return this.runJson([

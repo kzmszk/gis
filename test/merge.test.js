@@ -269,6 +269,29 @@ test('blocks a bead whose branch has no commit ahead of base', async () => {
   ]);
 });
 
+test('blocks commits containing GIS runtime artifacts', async () => {
+  const events = [];
+  const base = options(events);
+  const result = await new SerialMergeQueue(
+    options(events, {
+      git: {
+        ...base.git,
+        async changedPaths() {
+          return ['src/feature.ts', '.gis/run/round-1-impl.json'];
+        },
+      },
+    }),
+  ).enqueue(item('gis-vst.artifact', events));
+
+  assert.equal(result.status, 'blocked');
+  assert.equal(result.phase, 'commit');
+  assert.match(String(result.error), /GIS runtime artifacts/);
+  assert.equal(
+    events.some((event) => event.startsWith('merge:')),
+    false,
+  );
+});
+
 test('does not re-block after git merge when closing the bead fails', async () => {
   const events = [];
   const result = await new SerialMergeQueue(

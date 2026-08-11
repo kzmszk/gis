@@ -16,6 +16,7 @@ import { tmpdir } from 'node:os';
 import { test } from 'node:test';
 import { promisify } from 'node:util';
 import { pathToFileURL } from 'node:url';
+import { herdrAgentName } from '../dist/worker.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -39,6 +40,7 @@ const bead = {
   priority: 1,
   issue_type: 'task',
 };
+const agentName = herdrAgentName(bead.id);
 
 async function writeFakeCommands(root) {
   const bin = join(root, 'bin');
@@ -117,6 +119,7 @@ test('gis run connects default bd, herdr, and git adapters through merge cleanup
   const baseCwd = await realpath(root);
   const herdrEvents = [];
   let agentStarted = false;
+  let launchSnapshots = 0;
   let agentSessionReported = false;
   await mkdir(join(root, '.gis'), { recursive: true });
   await writeFile(statePath, JSON.stringify({ status: 'open' }), 'utf8');
@@ -144,16 +147,21 @@ test('gis run connects default bd, herdr, and git adapters through merge cleanup
       herdrEvents.push(request.method);
       let result;
       if (request.method === 'session.snapshot') {
+        if (agentStarted && !agentSessionReported) launchSnapshots += 1;
         result = snapshot(
           agentStarted
             ? [
                 {
                   agent: 'codex',
-                  name: bead.id,
+                  name: agentName,
                   pane_id: `pane-${bead.id}`,
                   workspace_id: `ws-${bead.id}`,
                   tab_id: `tab-${bead.id}`,
-                  agent_status: agentSessionReported ? 'done' : 'working',
+                  agent_status: agentSessionReported
+                    ? 'done'
+                    : launchSnapshots >= 2
+                      ? 'done'
+                      : 'working',
                   interactive_ready: true,
                   state_change_seq: 2,
                   agent_session: agentSessionReported
@@ -203,10 +211,20 @@ test('gis run connects default bd, herdr, and git adapters through merge cleanup
         };
       } else if (request.method === 'agent.prompt') {
         agentSessionReported = true;
+        const promptContents = await readFile(
+          join(worktreePath, '.gis', 'run', 'prompt.md'),
+          'utf8',
+        );
+        const runId = /Run ID: `([^`]+)`/.exec(promptContents)?.[1];
+        assert.ok(runId);
         await Promise.all([
           writeFile(
             join(worktreePath, '.gis', 'run', 'round-1-impl.json'),
-            '{"status":"done","summary":"CLI worker completed"}',
+            JSON.stringify({
+              run_id: runId,
+              status: 'done',
+              summary: 'CLI worker completed',
+            }),
             'utf8',
           ),
           writeFile(
@@ -286,9 +304,11 @@ test('gis run connects default bd, herdr, and git adapters through merge cleanup
     );
     assert.deepEqual(herdrEvents, [
       'session.snapshot',
+      'session.snapshot',
       'worktree.create',
       'session.snapshot',
       'agent.start',
+      'session.snapshot',
       'session.snapshot',
       'agent.prompt',
       'agent.wait',
@@ -303,8 +323,10 @@ test('gis run connects default bd, herdr, and git adapters through merge cleanup
         .map((line) => JSON.parse(line)),
       [
         ['worktree', 'list', '--porcelain'],
+        ['worktree', 'list', '--porcelain'],
         ['-C', worktreePath, 'rebase', 'main'],
         ['-C', worktreePath, 'rev-list', '--count', 'main..HEAD'],
+        ['-C', worktreePath, 'diff', '--name-only', 'main..HEAD'],
         ['-C', baseCwd, 'merge', '--ff-only', bead.id],
         ['-C', baseCwd, 'branch', '-d', bead.id],
       ],
