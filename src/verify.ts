@@ -1,9 +1,9 @@
-import { exec } from "node:child_process";
-import type { ExecException } from "node:child_process";
-import { promisify } from "node:util";
-import type { Bead, BeadHandoffLocations } from "./beads.js";
-import { parseDurationMs, type GisConfig } from "./config.js";
-import { promptWorker, type WorkerPromptSource } from "./worker.js";
+import { exec } from 'node:child_process';
+import type { ExecException } from 'node:child_process';
+import { promisify } from 'node:util';
+import type { Bead, BeadHandoffLocations } from './beads.js';
+import { parseDurationMs, type GisConfig } from './config.js';
+import { promptWorker, type WorkerPromptSource } from './worker.js';
 
 const execAsync = promisify(exec);
 const VERIFY_MAX_BUFFER = 10 * 1024 * 1024;
@@ -27,13 +27,13 @@ export interface VerifyLoopBeadsSource {
 }
 
 export interface VerifyLoopOptions {
-  readonly bead: Pick<Bead, "id" | "description" | "acceptance_criteria">;
+  readonly bead: Pick<Bead, 'id' | 'description' | 'acceptance_criteria'>;
   readonly worktreePath: string;
   readonly runPath: string;
   readonly transcriptPath: string;
   /** Resolve the live session again when a final failed attempt is handed off. */
   readonly resolveTranscriptPath?: () => Promise<string>;
-  readonly config: Pick<GisConfig, "verify" | "verify_max" | "verify_timeout">;
+  readonly config: Pick<GisConfig, 'verify' | 'verify_max' | 'verify_timeout'>;
   readonly beads: VerifyLoopBeadsSource;
   /** Herdr target for the implementation pane; defaults to the bead ID. */
   readonly target?: string;
@@ -44,14 +44,14 @@ export interface VerifyLoopOptions {
 }
 
 export interface VerifyLoopVerifiedResult {
-  readonly status: "verified";
+  readonly status: 'verified';
   /** Number of verify commands that were actually run. */
   readonly attempts: number;
   readonly result: VerifyCommandResult;
 }
 
 export interface VerifyLoopBlockedResult {
-  readonly status: "blocked";
+  readonly status: 'blocked';
   /** Number of verify commands that were actually run. */
   readonly attempts: number;
   readonly result: VerifyCommandResult;
@@ -59,10 +59,12 @@ export interface VerifyLoopBlockedResult {
   readonly bead: Bead;
 }
 
-export type VerifyLoopResult = VerifyLoopVerifiedResult | VerifyLoopBlockedResult;
+export type VerifyLoopResult =
+  | VerifyLoopVerifiedResult
+  | VerifyLoopBlockedResult;
 
 function requireNonEmpty(value: string, name: string): void {
-  if (typeof value !== "string" || value.trim().length === 0) {
+  if (typeof value !== 'string' || value.trim().length === 0) {
     throw new TypeError(`${name} must not be empty`);
   }
 }
@@ -74,11 +76,17 @@ function requirePositiveInteger(value: number, name: string): void {
 }
 
 function text(value: unknown): string {
-  return typeof value === "string" ? value : value instanceof Buffer ? value.toString("utf8") : "";
+  return typeof value === 'string'
+    ? value
+    : value instanceof Buffer
+      ? value.toString('utf8')
+      : '';
 }
 
-function exitCode(error: ExecException & { code?: string | number }): number | undefined {
-  return typeof error.code === "number" ? error.code : undefined;
+function exitCode(
+  error: ExecException & { code?: string | number },
+): number | undefined {
+  return typeof error.code === 'number' ? error.code : undefined;
 }
 
 /** Execute the configured shell command in the bead's worktree. */
@@ -87,13 +95,13 @@ export async function runVerifyCommand(
   cwd: string,
   timeoutMs?: number,
 ): Promise<VerifyCommandResult> {
-  requireNonEmpty(command, "verifyCommand");
-  requireNonEmpty(cwd, "cwd");
+  requireNonEmpty(command, 'verifyCommand');
+  requireNonEmpty(cwd, 'cwd');
 
   try {
     const result = await execAsync(command, {
       cwd,
-      encoding: "utf8",
+      encoding: 'utf8',
       maxBuffer: VERIFY_MAX_BUFFER,
       timeout: timeoutMs,
     });
@@ -123,23 +131,23 @@ export async function runVerifyCommand(
   }
 }
 
-function failureFeedback(
-  command: string,
-  result: VerifyCommandResult,
-): string {
+function failureFeedback(command: string, result: VerifyCommandResult): string {
   const output = [result.stdout?.trim(), result.stderr?.trim()]
     .filter((part): part is string => Boolean(part))
-    .join("\n");
-  const status = result.exitCode === undefined
-    ? result.signal === undefined ? "unknown status" : `signal ${result.signal}`
-    : `exit code ${result.exitCode}`;
+    .join('\n');
+  const status =
+    result.exitCode === undefined
+      ? result.signal === undefined
+        ? 'unknown status'
+        : `signal ${result.signal}`
+      : `exit code ${result.exitCode}`;
 
   return [
     `Verification command failed: ${command}`,
     `Result: ${status}`,
-    "",
-    output || "(the command produced no output)",
-  ].join("\n");
+    '',
+    output || '(the command produced no output)',
+  ].join('\n');
 }
 
 /**
@@ -155,39 +163,40 @@ function failureFeedback(
 export async function runVerificationLoop(
   options: VerifyLoopOptions,
 ): Promise<VerifyLoopResult> {
-  requireNonEmpty(options.bead.id, "bead.id");
-  requireNonEmpty(options.bead.description, "bead.description");
-  requireNonEmpty(options.worktreePath, "worktreePath");
-  requireNonEmpty(options.runPath, "runPath");
-  requireNonEmpty(options.transcriptPath, "transcriptPath");
-  requireNonEmpty(options.config.verify, "config.verify");
-  requirePositiveInteger(options.config.verify_max, "config.verify_max");
+  requireNonEmpty(options.bead.id, 'bead.id');
+  requireNonEmpty(options.bead.description, 'bead.description');
+  requireNonEmpty(options.worktreePath, 'worktreePath');
+  requireNonEmpty(options.runPath, 'runPath');
+  requireNonEmpty(options.transcriptPath, 'transcriptPath');
+  requireNonEmpty(options.config.verify, 'config.verify');
+  requirePositiveInteger(options.config.verify_max, 'config.verify_max');
 
   const target = options.target ?? options.bead.id;
-  requireNonEmpty(target, "target");
+  requireNonEmpty(target, 'target');
   const runVerify = options.runVerify ?? runVerifyCommand;
 
   for (let attempt = 1; attempt <= options.config.verify_max; attempt += 1) {
     const result = await runVerify(
       options.config.verify,
       options.worktreePath,
-      parseDurationMs(options.config.verify_timeout, "verify_timeout"),
+      parseDurationMs(options.config.verify_timeout, 'verify_timeout'),
     );
     if (result.passed) {
-      return { status: "verified", attempts: attempt, result };
+      return { status: 'verified', attempts: attempt, result };
     }
 
     if (attempt === options.config.verify_max) {
-      const transcriptPath = options.resolveTranscriptPath === undefined
-        ? options.transcriptPath
-        : await options.resolveTranscriptPath();
+      const transcriptPath =
+        options.resolveTranscriptPath === undefined
+          ? options.transcriptPath
+          : await options.resolveTranscriptPath();
       const handoff: BeadHandoffLocations = {
         worktreePath: options.worktreePath,
         roundLogPath: options.runPath,
         transcriptPath,
       };
       const bead = await options.beads.markBlocked(options.bead.id, handoff);
-      return { status: "blocked", attempts: attempt, result, handoff, bead };
+      return { status: 'blocked', attempts: attempt, result, handoff, bead };
     }
 
     await promptWorker({
@@ -203,7 +212,7 @@ export async function runVerificationLoop(
   }
 
   // The positive-integer validation and bounded loop make this unreachable.
-  throw new Error("verify loop ended without a result");
+  throw new Error('verify loop ended without a result');
 }
 
 export const verifyLoop = runVerificationLoop;

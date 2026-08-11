@@ -1,14 +1,11 @@
-import { execFile } from "node:child_process";
-import type { ExecFileException } from "node:child_process";
-import { promisify } from "node:util";
-import { join, resolve } from "node:path";
-import type { Bead, BeadHandoffLocations } from "./beads.js";
-import { createBeadsAdapter } from "./beads.js";
-import type {
-  SessionSnapshot,
-  SessionSnapshotResult,
-} from "./herdr.js";
-import { createHerdrAdapter } from "./herdr.js";
+import { execFile } from 'node:child_process';
+import type { ExecFileException } from 'node:child_process';
+import { promisify } from 'node:util';
+import { join, resolve } from 'node:path';
+import type { Bead, BeadHandoffLocations } from './beads.js';
+import { createBeadsAdapter } from './beads.js';
+import type { SessionSnapshot, SessionSnapshotResult } from './herdr.js';
+import { createHerdrAdapter } from './herdr.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -31,7 +28,7 @@ export interface GitAdapterOptions {
 export class GitError extends Error {
   constructor(message: string) {
     super(message);
-    this.name = "GitError";
+    this.name = 'GitError';
   }
 }
 
@@ -45,32 +42,36 @@ export class GitCommandError extends GitError {
     args: readonly string[],
     error: ExecFileException & { stderr?: string | Buffer },
   ) {
-    const details = error.message || "git command failed";
-    super(`git command failed (${args.join(" ")}): ${details}`);
-    this.name = "GitCommandError";
+    const details = error.message || 'git command failed';
+    super(`git command failed (${args.join(' ')}): ${details}`);
+    this.name = 'GitCommandError';
     this.args = [...args];
-    this.code = typeof error.code === "string" || typeof error.code === "number"
-      ? error.code
-      : undefined;
-    this.signal = typeof error.signal === "string" ? error.signal : undefined;
+    this.code =
+      typeof error.code === 'string' || typeof error.code === 'number'
+        ? error.code
+        : undefined;
+    this.signal = typeof error.signal === 'string' ? error.signal : undefined;
     const stderr = (error as { stderr?: unknown }).stderr;
-    this.stderr = typeof stderr === "string"
-      ? stderr
-      : stderr instanceof Buffer
-        ? stderr.toString("utf8")
-        : "";
+    this.stderr =
+      typeof stderr === 'string'
+        ? stderr
+        : stderr instanceof Buffer
+          ? stderr.toString('utf8')
+          : '';
   }
 }
 
 export class GitProtocolError extends GitError {
   constructor(message: string) {
     super(`invalid git worktree list: ${message}`);
-    this.name = "GitProtocolError";
+    this.name = 'GitProtocolError';
   }
 }
 
-function normalizeOptions(options: GitAdapterOptions | string | undefined): GitAdapterOptions {
-  return typeof options === "string" ? { command: options } : (options ?? {});
+function normalizeOptions(
+  options: GitAdapterOptions | string | undefined,
+): GitAdapterOptions {
+  return typeof options === 'string' ? { command: options } : (options ?? {});
 }
 
 function parseWorktreeRecord(record: string, index: number): GitWorktree {
@@ -80,23 +81,27 @@ function parseWorktreeRecord(record: string, index: number): GitWorktree {
   let isDetached = false;
   let isPrunable = false;
 
-  for (const line of record.split("\n")) {
-    if (line.startsWith("worktree ")) {
-      path = line.slice("worktree ".length);
-    } else if (line.startsWith("branch ")) {
-      const ref = line.slice("branch ".length);
-      branch = ref.startsWith("refs/heads/") ? ref.slice("refs/heads/".length) : ref;
-    } else if (line === "bare") {
+  for (const line of record.split('\n')) {
+    if (line.startsWith('worktree ')) {
+      path = line.slice('worktree '.length);
+    } else if (line.startsWith('branch ')) {
+      const ref = line.slice('branch '.length);
+      branch = ref.startsWith('refs/heads/')
+        ? ref.slice('refs/heads/'.length)
+        : ref;
+    } else if (line === 'bare') {
       isBare = true;
-    } else if (line === "detached") {
+    } else if (line === 'detached') {
       isDetached = true;
-    } else if (line.startsWith("prunable")) {
+    } else if (line.startsWith('prunable')) {
       isPrunable = true;
     }
   }
 
   if (path === undefined || path.length === 0) {
-    throw new GitProtocolError(`record ${index} did not contain a worktree path`);
+    throw new GitProtocolError(
+      `record ${index} did not contain a worktree path`,
+    );
   }
 
   return { path, branch, isBare, isDetached, isPrunable };
@@ -123,16 +128,21 @@ export class GitAdapter {
 
   constructor(options?: GitAdapterOptions | string) {
     const normalized = normalizeOptions(options);
-    if (normalized.timeoutMs !== undefined &&
-        (!Number.isFinite(normalized.timeoutMs) || normalized.timeoutMs <= 0)) {
-      throw new RangeError("timeoutMs must be a positive finite number");
+    if (
+      normalized.timeoutMs !== undefined &&
+      (!Number.isFinite(normalized.timeoutMs) || normalized.timeoutMs <= 0)
+    ) {
+      throw new RangeError('timeoutMs must be a positive finite number');
     }
-    if (normalized.maxBufferBytes !== undefined &&
-        (!Number.isInteger(normalized.maxBufferBytes) || normalized.maxBufferBytes <= 0)) {
-      throw new RangeError("maxBufferBytes must be a positive integer");
+    if (
+      normalized.maxBufferBytes !== undefined &&
+      (!Number.isInteger(normalized.maxBufferBytes) ||
+        normalized.maxBufferBytes <= 0)
+    ) {
+      throw new RangeError('maxBufferBytes must be a positive integer');
     }
 
-    this.command = normalized.command ?? "git";
+    this.command = normalized.command ?? 'git';
     this.cwd = normalized.cwd;
     this.env = normalized.env;
     this.timeoutMs = normalized.timeoutMs;
@@ -140,15 +150,15 @@ export class GitAdapter {
   }
 
   async listWorktrees(): Promise<GitWorktree[]> {
-    const args = ["worktree", "list", "--porcelain"];
+    const args = ['worktree', 'list', '--porcelain'];
     try {
-      const result = await execFileAsync(this.command, args, {
+      const result = (await execFileAsync(this.command, args, {
         cwd: this.cwd,
         env: this.env,
         timeout: this.timeoutMs,
         maxBuffer: this.maxBufferBytes,
-        encoding: "utf8",
-      }) as { stdout: string };
+        encoding: 'utf8',
+      })) as { stdout: string };
       return parseGitWorktreeList(result.stdout);
     } catch (error: unknown) {
       if (error instanceof GitProtocolError) {
@@ -160,18 +170,22 @@ export class GitAdapter {
           error as ExecFileException & { stderr?: string | Buffer },
         );
       }
-      throw new GitError(`git command failed (${args.join(" ")}): ${String(error)}`);
+      throw new GitError(
+        `git command failed (${args.join(' ')}): ${String(error)}`,
+      );
     }
   }
 }
 
-export function createGitAdapter(options?: GitAdapterOptions | string): GitAdapter {
+export function createGitAdapter(
+  options?: GitAdapterOptions | string,
+): GitAdapter {
   return new GitAdapter(options);
 }
 
 interface BeadsRecoverySource {
   listInProgress(): Promise<readonly Bead[]>;
-  update(issueId: string, update: { readonly status: "open" }): Promise<Bead>;
+  update(issueId: string, update: { readonly status: 'open' }): Promise<Bead>;
   markBlocked(issueId: string, locations: BeadHandoffLocations): Promise<Bead>;
 }
 
@@ -204,11 +218,18 @@ export interface StartupReconciliationOptions {
 }
 
 function pathFrom(value: unknown, cwd: string): string | undefined {
-  return typeof value === "string" && value.length > 0 ? resolve(cwd, value) : undefined;
+  return typeof value === 'string' && value.length > 0
+    ? resolve(cwd, value)
+    : undefined;
 }
 
-function liveWorktreePaths(snapshot: SessionSnapshot, cwd: string): Set<string> {
-  const paneWorkspaceIds = new Set(snapshot.panes.map((pane) => pane.workspace_id));
+function liveWorktreePaths(
+  snapshot: SessionSnapshot,
+  cwd: string,
+): Set<string> {
+  const paneWorkspaceIds = new Set(
+    snapshot.panes.map((pane) => pane.workspace_id),
+  );
   const paths = new Set<string>();
 
   for (const workspace of snapshot.workspaces) {
@@ -239,8 +260,12 @@ function normalizeWorktreePath(worktree: GitWorktree, cwd: string): string {
 }
 
 function isWorkerWorktree(worktree: GitWorktree, baseBranch: string): boolean {
-  return !worktree.isBare && !worktree.isDetached &&
-    worktree.branch !== null && worktree.branch !== baseBranch;
+  return (
+    !worktree.isBare &&
+    !worktree.isDetached &&
+    worktree.branch !== null &&
+    worktree.branch !== baseBranch
+  );
 }
 
 export async function reconcileStartup(
@@ -250,8 +275,9 @@ export async function reconcileStartup(
   const beads = options.beads ?? createBeadsAdapter({ cwd });
   const herdr = options.herdr ?? createHerdrAdapter();
   const git = options.git ?? createGitAdapter({ cwd });
-  const baseBranch = options.baseBranch ?? "main";
-  const report = options.report ?? ((message: string) => console.warn(`gis: ${message}`));
+  const baseBranch = options.baseBranch ?? 'main';
+  const report =
+    options.report ?? ((message: string) => console.warn(`gis: ${message}`));
 
   const [snapshotResult, worktrees, inProgress] = await Promise.all([
     herdr.apiSnapshot(),
@@ -268,21 +294,25 @@ export async function reconcileStartup(
   const blockedIssueIds: string[] = [];
 
   for (const bead of inProgress) {
-    const hasLivePane = normalizedWorktrees.some(({ worktree, path }) =>
-      worktree.branch === bead.id && livePaths.has(path));
+    const hasLivePane = normalizedWorktrees.some(
+      ({ worktree, path }) =>
+        worktree.branch === bead.id && livePaths.has(path),
+    );
     if (hasLivePane) {
       continue;
     }
 
-    const retained = normalizedWorktrees.find(({ worktree }) => worktree.branch === bead.id);
+    const retained = normalizedWorktrees.find(
+      ({ worktree }) => worktree.branch === bead.id,
+    );
     if (retained !== undefined) {
-      const runPath = join(retained.path, ".gis", "run");
+      const runPath = join(retained.path, '.gis', 'run');
       await beads.markBlocked(bead.id, {
         worktreePath: retained.path,
         roundLogPath: runPath,
-        transcriptPath: join(runPath, "transcript-recovery.unresolved"),
-        failurePhase: "startup recovery",
-        failureDetail: "worktree exists but no live herdr pane was found",
+        transcriptPath: join(runPath, 'transcript-recovery.unresolved'),
+        failurePhase: 'startup recovery',
+        failureDetail: 'worktree exists but no live herdr pane was found',
       });
       blockedIssueIds.push(bead.id);
       report(
@@ -291,7 +321,7 @@ export async function reconcileStartup(
       continue;
     }
 
-    await beads.update(bead.id, { status: "open" });
+    await beads.update(bead.id, { status: 'open' });
     reopenedIssueIds.push(bead.id);
   }
 

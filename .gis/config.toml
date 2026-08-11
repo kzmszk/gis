@@ -1,6 +1,6 @@
 concurrency = 3
 base = "main"
-verify = "npm test && npm run lint"
+verify = "pnpm check"
 kinds = ["claude", "codex"]
 review = false
 verify_max = 5

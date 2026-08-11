@@ -1,12 +1,16 @@
-import { execFile } from "node:child_process";
-import type { ExecFileException } from "node:child_process";
-import { promisify } from "node:util";
-import type { Bead, BeadHandoffLocations } from "./beads.js";
-import { parseDurationMs } from "./config.js";
-import type { GitAdapterOptions } from "./recovery.js";
-import { GitCommandError } from "./recovery.js";
-import { runVerifyCommand, type VerifyCommandResult, type VerifyCommandRunner } from "./verify.js";
-import type { BeadWorktree } from "./worktree.js";
+import { execFile } from 'node:child_process';
+import type { ExecFileException } from 'node:child_process';
+import { promisify } from 'node:util';
+import type { Bead, BeadHandoffLocations } from './beads.js';
+import { parseDurationMs } from './config.js';
+import type { GitAdapterOptions } from './recovery.js';
+import { GitCommandError } from './recovery.js';
+import {
+  runVerifyCommand,
+  type VerifyCommandResult,
+  type VerifyCommandRunner,
+} from './verify.js';
+import type { BeadWorktree } from './worktree.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -27,8 +31,8 @@ export interface MergeBeadsSource {
 }
 
 export interface MergeQueueItem {
-  readonly bead: Pick<Bead, "id">;
-  readonly worktree: Pick<BeadWorktree, "path" | "runPath" | "remove">;
+  readonly bead: Pick<Bead, 'id'>;
+  readonly worktree: Pick<BeadWorktree, 'path' | 'runPath' | 'remove'>;
   /** The runner transcript path used in the blocked-bead handoff. */
   readonly transcriptPath: string;
 }
@@ -44,10 +48,10 @@ export interface MergeQueueOptions {
   readonly runVerify?: VerifyCommandRunner;
 }
 
-export type MergeFailurePhase = "rebase" | "commit" | "verify" | "merge";
+export type MergeFailurePhase = 'rebase' | 'commit' | 'verify' | 'merge';
 
 export interface MergeBlockedResult {
-  readonly status: "blocked";
+  readonly status: 'blocked';
   readonly phase: MergeFailurePhase;
   readonly bead: Bead;
   readonly handoff: BeadHandoffLocations;
@@ -56,8 +60,8 @@ export interface MergeBlockedResult {
 }
 
 export interface MergeMergedResult {
-  readonly status: "merged";
-  readonly bead: Pick<Bead, "id">;
+  readonly status: 'merged';
+  readonly bead: Pick<Bead, 'id'>;
   /** Main contains the commit, but closing the Beads issue failed. */
   readonly stateError?: unknown;
   /** Main and bd are committed, but cleanup needs human/retry attention. */
@@ -67,7 +71,7 @@ export interface MergeMergedResult {
 export type MergeResult = MergeMergedResult | MergeBlockedResult;
 
 function requireNonEmpty(value: string, name: string): void {
-  if (typeof value !== "string" || value.trim().length === 0) {
+  if (typeof value !== 'string' || value.trim().length === 0) {
     throw new TypeError(`${name} must not be empty`);
   }
 }
@@ -75,14 +79,17 @@ function requireNonEmpty(value: string, name: string): void {
 function verifyFailure(result: VerifyCommandResult): string {
   const output = [result.stdout?.trim(), result.stderr?.trim()]
     .filter((part): part is string => Boolean(part))
-    .join("\n");
-  const status = result.exitCode === undefined
-    ? result.signal === undefined ? "unknown status" : `signal ${result.signal}`
-    : `exit code ${result.exitCode}`;
+    .join('\n');
+  const status =
+    result.exitCode === undefined
+      ? result.signal === undefined
+        ? 'unknown status'
+        : `signal ${result.signal}`
+      : `exit code ${result.exitCode}`;
   return [
     `verification failed (${status})`,
-    output || "(the command produced no output)",
-  ].join("\n");
+    output || '(the command produced no output)',
+  ].join('\n');
 }
 
 function handoffFor(item: MergeQueueItem): BeadHandoffLocations {
@@ -113,16 +120,20 @@ export class GitMergeAdapter implements MergeGitSource {
   private readonly maxBufferBytes: number;
 
   constructor(options: GitAdapterOptions = {}) {
-    if (options.timeoutMs !== undefined &&
-        (!Number.isFinite(options.timeoutMs) || options.timeoutMs <= 0)) {
-      throw new RangeError("timeoutMs must be a positive finite number");
+    if (
+      options.timeoutMs !== undefined &&
+      (!Number.isFinite(options.timeoutMs) || options.timeoutMs <= 0)
+    ) {
+      throw new RangeError('timeoutMs must be a positive finite number');
     }
-    if (options.maxBufferBytes !== undefined &&
-        (!Number.isInteger(options.maxBufferBytes) || options.maxBufferBytes <= 0)) {
-      throw new RangeError("maxBufferBytes must be a positive integer");
+    if (
+      options.maxBufferBytes !== undefined &&
+      (!Number.isInteger(options.maxBufferBytes) || options.maxBufferBytes <= 0)
+    ) {
+      throw new RangeError('maxBufferBytes must be a positive integer');
     }
 
-    this.command = options.command ?? "git";
+    this.command = options.command ?? 'git';
     this.cwd = options.cwd;
     this.env = options.env;
     this.timeoutMs = options.timeoutMs;
@@ -130,36 +141,46 @@ export class GitMergeAdapter implements MergeGitSource {
   }
 
   rebase(worktreePath: string, baseBranch: string): Promise<void> {
-    requireNonEmpty(worktreePath, "worktreePath");
-    requireNonEmpty(baseBranch, "baseBranch");
-    return this.run(["-C", worktreePath, "rebase", baseBranch]).then(() => undefined);
+    requireNonEmpty(worktreePath, 'worktreePath');
+    requireNonEmpty(baseBranch, 'baseBranch');
+    return this.run(['-C', worktreePath, 'rebase', baseBranch]).then(
+      () => undefined,
+    );
   }
 
   async hasCommits(worktreePath: string, baseBranch: string): Promise<boolean> {
-    requireNonEmpty(worktreePath, "worktreePath");
-    requireNonEmpty(baseBranch, "baseBranch");
+    requireNonEmpty(worktreePath, 'worktreePath');
+    requireNonEmpty(baseBranch, 'baseBranch');
     const stdout = await this.run([
-      "-C", worktreePath, "rev-list", "--count", `${baseBranch}..HEAD`,
+      '-C',
+      worktreePath,
+      'rev-list',
+      '--count',
+      `${baseBranch}..HEAD`,
     ]);
     const count = Number(stdout.trim());
     if (!Number.isSafeInteger(count) || count < 0) {
-      throw new Error(`git rev-list returned an invalid count: ${stdout.trim()}`);
+      throw new Error(
+        `git rev-list returned an invalid count: ${stdout.trim()}`,
+      );
     }
     return count > 0;
   }
 
   merge(repositoryPath: string, branch: string): Promise<void> {
-    requireNonEmpty(repositoryPath, "repositoryPath");
-    requireNonEmpty(branch, "branch");
-    return this.run(["-C", repositoryPath, "merge", "--ff-only", branch])
-      .then(() => undefined);
+    requireNonEmpty(repositoryPath, 'repositoryPath');
+    requireNonEmpty(branch, 'branch');
+    return this.run(['-C', repositoryPath, 'merge', '--ff-only', branch]).then(
+      () => undefined,
+    );
   }
 
   deleteBranch(repositoryPath: string, branch: string): Promise<void> {
-    requireNonEmpty(repositoryPath, "repositoryPath");
-    requireNonEmpty(branch, "branch");
-    return this.run(["-C", repositoryPath, "branch", "-d", branch])
-      .then(() => undefined);
+    requireNonEmpty(repositoryPath, 'repositoryPath');
+    requireNonEmpty(branch, 'branch');
+    return this.run(['-C', repositoryPath, 'branch', '-d', branch]).then(
+      () => undefined,
+    );
   }
 
   private async run(args: readonly string[]): Promise<string> {
@@ -169,7 +190,7 @@ export class GitMergeAdapter implements MergeGitSource {
         env: this.env,
         timeout: this.timeoutMs,
         maxBuffer: this.maxBufferBytes,
-        encoding: "utf8",
+        encoding: 'utf8',
       });
       return result.stdout;
     } catch (error: unknown) {
@@ -179,7 +200,9 @@ export class GitMergeAdapter implements MergeGitSource {
           error as ExecFileException & { stderr?: string | Buffer },
         );
       }
-      throw new Error(`git command failed (${args.join(" ")}): ${String(error)}`);
+      throw new Error(
+        `git command failed (${args.join(' ')}): ${String(error)}`,
+      );
     }
   }
 }
@@ -195,10 +218,10 @@ export class SerialMergeQueue {
   private tail: Promise<void> = Promise.resolve();
 
   constructor(options: MergeQueueOptions) {
-    requireNonEmpty(options.repositoryPath, "repositoryPath");
-    requireNonEmpty(options.baseBranch, "baseBranch");
-    requireNonEmpty(options.verifyCommand, "verifyCommand");
-    requireNonEmpty(options.verifyTimeout, "verifyTimeout");
+    requireNonEmpty(options.repositoryPath, 'repositoryPath');
+    requireNonEmpty(options.baseBranch, 'baseBranch');
+    requireNonEmpty(options.verifyCommand, 'verifyCommand');
+    requireNonEmpty(options.verifyTimeout, 'verifyTimeout');
     this.options = options;
     this.git = options.git ?? defaultGit();
     this.runVerify = options.runVerify ?? runVerifyCommand;
@@ -207,7 +230,10 @@ export class SerialMergeQueue {
   /** Enqueue one item; its full merge lifecycle is mutually exclusive. */
   enqueue(item: MergeQueueItem): Promise<MergeResult> {
     const operation = this.tail.then(() => this.process(item));
-    this.tail = operation.then(() => undefined, () => undefined);
+    this.tail = operation.then(
+      () => undefined,
+      () => undefined,
+    );
     return operation;
   }
 
@@ -221,30 +247,35 @@ export class SerialMergeQueue {
   }
 
   private async process(item: MergeQueueItem): Promise<MergeResult> {
-    requireNonEmpty(item.bead.id, "bead.id");
-    requireNonEmpty(item.worktree.path, "worktree.path");
-    requireNonEmpty(item.worktree.runPath, "worktree.runPath");
-    requireNonEmpty(item.transcriptPath, "transcriptPath");
+    requireNonEmpty(item.bead.id, 'bead.id');
+    requireNonEmpty(item.worktree.path, 'worktree.path');
+    requireNonEmpty(item.worktree.runPath, 'worktree.runPath');
+    requireNonEmpty(item.transcriptPath, 'transcriptPath');
 
     const handoff = handoffFor(item);
 
     try {
       await this.git.rebase(item.worktree.path, this.options.baseBranch);
     } catch (error: unknown) {
-      return this.blocked(item, handoff, "rebase", error);
+      return this.blocked(item, handoff, 'rebase', error);
     }
 
     try {
-      if (!await this.git.hasCommits(item.worktree.path, this.options.baseBranch)) {
+      if (
+        !(await this.git.hasCommits(
+          item.worktree.path,
+          this.options.baseBranch,
+        ))
+      ) {
         return this.blocked(
           item,
           handoff,
-          "commit",
-          new Error("bead branch has no commit ahead of base"),
+          'commit',
+          new Error('bead branch has no commit ahead of base'),
         );
       }
     } catch (error: unknown) {
-      return this.blocked(item, handoff, "commit", error);
+      return this.blocked(item, handoff, 'commit', error);
     }
 
     let verification: VerifyCommandResult;
@@ -252,33 +283,39 @@ export class SerialMergeQueue {
       verification = await this.runVerify(
         this.options.verifyCommand,
         item.worktree.path,
-        parseDurationMs(this.options.verifyTimeout, "verify_timeout"),
+        parseDurationMs(this.options.verifyTimeout, 'verify_timeout'),
       );
     } catch (error: unknown) {
-      return this.blocked(item, handoff, "verify", error);
+      return this.blocked(item, handoff, 'verify', error);
     }
     if (!verification.passed) {
-      return this.blocked(item, handoff, "verify", new Error(verifyFailure(verification)), verification);
+      return this.blocked(
+        item,
+        handoff,
+        'verify',
+        new Error(verifyFailure(verification)),
+        verification,
+      );
     }
 
     try {
       await this.git.merge(this.options.repositoryPath, item.bead.id);
     } catch (error: unknown) {
-      return this.blocked(item, handoff, "merge", error, verification);
+      return this.blocked(item, handoff, 'merge', error, verification);
     }
 
     // These are intentionally after merge and never occur on a pre-merge
     // failure. Worktree removal is the final side effect of a successful bead.
-    let bead: Pick<Bead, "id">;
+    let bead: Pick<Bead, 'id'>;
     try {
       bead = await this.options.beads.markMerged(
         item.bead.id,
-        "merged after rebase and verify",
+        'merged after rebase and verify',
       );
     } catch (stateError: unknown) {
       // Git integration already succeeded. Retain the worktree and report the
       // Beads write failure without ever moving the issue back to blocked.
-      return { status: "merged", bead: item.bead, stateError };
+      return { status: 'merged', bead: item.bead, stateError };
     }
 
     const cleanup = async (): Promise<void> => {
@@ -287,16 +324,20 @@ export class SerialMergeQueue {
     };
     try {
       await cleanup();
-      return { status: "merged", bead };
+      return { status: 'merged', bead };
     } catch (firstError: unknown) {
       // A cleanup call can fail after git and bd have already committed the
       // bead. Retrying is safe because worktree removal is idempotent; most
       // importantly, never turn an already-closed bead back into blocked.
       try {
         await cleanup();
-        return { status: "merged", bead };
+        return { status: 'merged', bead };
       } catch (secondError: unknown) {
-        return { status: "merged", bead, cleanupError: secondError ?? firstError };
+        return {
+          status: 'merged',
+          bead,
+          cleanupError: secondError ?? firstError,
+        };
       }
     }
   }
@@ -313,14 +354,16 @@ export class SerialMergeQueue {
       failurePhase: phase,
       failureDetail: error instanceof Error ? error.message : String(error),
     };
-    return this.options.beads.markBlocked(item.bead.id, detailedHandoff).then((bead) => ({
-      status: "blocked",
-      phase,
-      bead,
-      handoff: detailedHandoff,
-      verification,
-      error,
-    }));
+    return this.options.beads
+      .markBlocked(item.bead.id, detailedHandoff)
+      .then((bead) => ({
+        status: 'blocked',
+        phase,
+        bead,
+        handoff: detailedHandoff,
+        verification,
+        error,
+      }));
   }
 }
 

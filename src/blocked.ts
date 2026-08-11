@@ -1,10 +1,17 @@
-import type { Bead, BeadHandoffLocations } from "./beads.js";
-import { parseDurationMs } from "./config.js";
-import { HerdrProtocolError } from "./herdr.js";
-import type { AgentStatus, AgentWaitOptions, AgentWaitResult } from "./herdr.js";
+import type { Bead, BeadHandoffLocations } from './beads.js';
+import { parseDurationMs } from './config.js';
+import { HerdrProtocolError } from './herdr.js';
+import type {
+  AgentStatus,
+  AgentWaitOptions,
+  AgentWaitResult,
+} from './herdr.js';
 
 export interface BlockedHerdrSource {
-  agentWait(target: string, options?: AgentWaitOptions): Promise<AgentWaitResult>;
+  agentWait(
+    target: string,
+    options?: AgentWaitOptions,
+  ): Promise<AgentWaitResult>;
 }
 export interface BlockedBeadsSource {
   markBlocked(issueId: string, locations: BeadHandoffLocations): Promise<Bead>;
@@ -32,7 +39,7 @@ export interface BlockedHandlingOptions {
 }
 
 export interface AgentWaitHandlingResult {
-  readonly status: "done" | "blocked";
+  readonly status: 'done' | 'blocked';
   /** Whether the worker entered blocked and was offered to a human. */
   readonly wasBlocked: boolean;
   /** True when the handler leaves the pane/worktree available for a human. */
@@ -43,25 +50,28 @@ export interface AgentWaitHandlingResult {
 
 /** Convert the config duration syntax into milliseconds for herdr. */
 export function parseBlockedTimeout(value: string): number {
-  return parseDurationMs(value, "blockedTimeout");
+  return parseDurationMs(value, 'blockedTimeout');
 }
 
-export function formatBlockedNotification(options: Pick<
-  BlockedHandlingOptions,
-  "beadId" | "target" | "worktreePath" | "blockedTimeout"
->): string {
+export function formatBlockedNotification(
+  options: Pick<
+    BlockedHandlingOptions,
+    'beadId' | 'target' | 'worktreePath' | 'blockedTimeout'
+  >,
+): string {
   return [
     `agent ${options.target} for bead ${options.beadId} is blocked`,
     `keeping pane and worktree ${options.worktreePath} for human intervention`,
     `waiting up to ${options.blockedTimeout}`,
-  ].join("; ");
+  ].join('; ');
 }
 
 function statusFromWait(result: AgentWaitResult): AgentStatus {
-  const status = result.type === "agent_info"
-    ? result.agent.agent_status
-    : result.event.data.agent_status;
-  if (status === "done" || status === "blocked") {
+  const status =
+    result.type === 'agent_info'
+      ? result.agent.agent_status
+      : result.event.data.agent_status;
+  if (status === 'done' || status === 'blocked') {
     return status;
   }
   throw new HerdrProtocolError(
@@ -74,27 +84,30 @@ function isTimeoutError(error: unknown): boolean {
     return false;
   }
 
-  const code = "code" in error ? (error as { code?: unknown }).code : undefined;
-  return (typeof code === "string" && /timeout|timed[_-]?out/i.test(code)) ||
-    /timed?\s*out|time[- ]?out/i.test(error.message);
+  const code = 'code' in error ? (error as { code?: unknown }).code : undefined;
+  return (
+    (typeof code === 'string' && /timeout|timed[_-]?out/i.test(code)) ||
+    /timed?\s*out|time[- ]?out/i.test(error.message)
+  );
 }
 
 async function markBlocked(
   options: BlockedHandlingOptions,
   wasBlocked: boolean,
 ): Promise<AgentWaitHandlingResult> {
-  const transcriptPath = options.resolveTranscriptPath === undefined
-    ? options.transcriptPath
-    : await options.resolveTranscriptPath();
+  const transcriptPath =
+    options.resolveTranscriptPath === undefined
+      ? options.transcriptPath
+      : await options.resolveTranscriptPath();
   const locations: BeadHandoffLocations = {
     worktreePath: options.worktreePath,
     roundLogPath: options.roundLogPath,
     transcriptPath,
-    failurePhase: wasBlocked ? "blocked timeout" : "worker timeout",
+    failurePhase: wasBlocked ? 'blocked timeout' : 'worker timeout',
   };
   const bead = await options.beads.markBlocked(options.beadId, locations);
   return {
-    status: "blocked",
+    status: 'blocked',
     wasBlocked,
     worktreeRetained: true,
     bead,
@@ -114,8 +127,8 @@ export async function waitForAgentWithBlockedHandling(
   let initial: AgentWaitResult;
   try {
     initial = await options.herdr.agentWait(options.target, {
-      until: ["done", "blocked"],
-      timeoutMs: parseDurationMs(options.workerTimeout, "workerTimeout"),
+      until: ['done', 'blocked'],
+      timeoutMs: parseDurationMs(options.workerTimeout, 'workerTimeout'),
     });
   } catch (error: unknown) {
     if (!isTimeoutError(error)) {
@@ -125,22 +138,23 @@ export async function waitForAgentWithBlockedHandling(
   }
   const initialStatus = statusFromWait(initial);
 
-  if (initialStatus === "done") {
-    return { status: "done", wasBlocked: false, worktreeRetained: false };
+  if (initialStatus === 'done') {
+    return { status: 'done', wasBlocked: false, worktreeRetained: false };
   }
 
-  const notify = options.notify ?? ((message: string) => console.warn(`gis: ${message}`));
+  const notify =
+    options.notify ?? ((message: string) => console.warn(`gis: ${message}`));
   notify(formatBlockedNotification(options));
 
   const timeoutMs = parseBlockedTimeout(options.blockedTimeout);
   try {
     const resumed = await options.herdr.agentWait(options.target, {
-      until: ["done"],
+      until: ['done'],
       timeoutMs,
     });
     const resumedStatus = statusFromWait(resumed);
-    if (resumedStatus === "done") {
-      return { status: "done", wasBlocked: true, worktreeRetained: true };
+    if (resumedStatus === 'done') {
+      return { status: 'done', wasBlocked: true, worktreeRetained: true };
     }
 
     // A compliant herdr endpoint should return a timeout error because this

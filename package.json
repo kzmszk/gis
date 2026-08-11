@@ -2,6 +2,7 @@
   "name": "gis",
   "version": "0.1.0",
   "private": true,
+  "packageManager": "pnpm@11.16.0",
   "files": [
     "dist"
   ],
@@ -11,12 +12,32 @@
   },
   "scripts": {
     "build": "tsc && chmod +x dist/cli.js",
-    "test": "npm run build && node --test",
-    "lint": "tsc --noEmit"
+    "check": "pnpm run format:check && pnpm run lint && pnpm run typecheck && pnpm test",
+    "format": "oxfmt .",
+    "format:check": "oxfmt --check .",
+    "lint": "oxlint . --deny-warnings",
+    "lint:fix": "oxlint . --fix --deny-warnings",
+    "prepare": "husky",
+    "test": "pnpm run build && node --test",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": "^22.22.1 || >=24"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
+    "husky": "^9.1.7",
+    "lint-staged": "^17.3.0",
+    "oxfmt": "^0.61.0",
+    "oxlint": "^1.76.0",
     "typescript": "^5.7.2"
+  },
+  "lint-staged": {
+    "*.{js,ts}": [
+      "oxfmt --no-error-on-unmatched-pattern",
+      "oxlint --fix --deny-warnings --no-error-on-unmatched-pattern"
+    ],
+    "*.{json,jsonc,md,yaml,yml}": "oxfmt --no-error-on-unmatched-pattern"
   },
   "dependencies": {
     "@iarna/toml": "^3.0.0"

@@ -1,36 +1,30 @@
-import { join, resolve } from "node:path";
-import type { Bead, BeadHandoffLocations, HumanGateRequest } from "./beads.js";
-import { createBeadsAdapter } from "./beads.js";
-import type { GisConfig } from "./config.js";
-import { loadConfig } from "./config.js";
-import { createHerdrAdapter } from "./herdr.js";
-import type {
-  AgentInfo,
-  AgentSessionInfo,
-} from "./herdr.js";
+import { join, resolve } from 'node:path';
+import type { Bead, BeadHandoffLocations, HumanGateRequest } from './beads.js';
+import { createBeadsAdapter } from './beads.js';
+import type { GisConfig } from './config.js';
+import { loadConfig } from './config.js';
+import { createHerdrAdapter } from './herdr.js';
+import type { AgentInfo, AgentSessionInfo } from './herdr.js';
 import {
   SerialMergeQueue,
   type MergeQueueItem,
   type MergeResult,
-} from "./merge.js";
-import { startWithProfileFallback } from "./profiles.js";
-import { readWorkerResult, type ResultFileState } from "./result.js";
-import { resolveAgentSessionTranscript } from "./transcripts.js";
+} from './merge.js';
+import { startWithProfileFallback } from './profiles.js';
+import { readWorkerResult, type ResultFileState } from './result.js';
+import { resolveAgentSessionTranscript } from './transcripts.js';
 import {
   waitForAgentWithBlockedHandling,
   type AgentWaitHandlingResult,
   type BlockedHerdrSource,
-} from "./blocked.js";
-import {
-  runVerificationLoop,
-  type VerifyLoopResult,
-} from "./verify.js";
+} from './blocked.js';
+import { runVerificationLoop, type VerifyLoopResult } from './verify.js';
 import {
   createBeadWorktree,
   type BeadWorktree,
   type CreateBeadWorktreeOptions,
-} from "./worktree.js";
-import type { WorktreeLifecycleSource } from "./worktree.js";
+} from './worktree.js';
+import type { WorktreeLifecycleSource } from './worktree.js';
 import {
   startWorker,
   type StartWorkerOptions,
@@ -38,7 +32,7 @@ import {
   type WorkerPromptSource,
   type WorkerStartupSource,
   WorkerStartupError,
-} from "./worker.js";
+} from './worker.js';
 
 export interface RunBeadsSource {
   ready(): Promise<readonly Bead[]>;
@@ -63,12 +57,15 @@ export interface RunWorkerSource {
 }
 
 export interface RunBlockedSource {
-  wait(options: Parameters<typeof waitForAgentWithBlockedHandling>[0]):
-    Promise<AgentWaitHandlingResult>;
+  wait(
+    options: Parameters<typeof waitForAgentWithBlockedHandling>[0],
+  ): Promise<AgentWaitHandlingResult>;
 }
 
 export interface RunVerifySource {
-  verify(options: Parameters<typeof runVerificationLoop>[0]): Promise<VerifyLoopResult>;
+  verify(
+    options: Parameters<typeof runVerificationLoop>[0],
+  ): Promise<VerifyLoopResult>;
 }
 
 export interface RunMergeSource {
@@ -100,16 +97,16 @@ export interface RunSummary {
 }
 
 type JobOutcome =
-  | { readonly status: "merged" }
-  | { readonly status: "blocked" }
-  | { readonly status: "human" };
+  | { readonly status: 'merged' }
+  | { readonly status: 'blocked' }
+  | { readonly status: 'human' };
 
 class AlreadyBlockedError extends Error {
   readonly bead: Bead;
 
   constructor(bead: Bead) {
     super(`worker for ${bead.id} entered blocked state`);
-    this.name = "AlreadyBlockedError";
+    this.name = 'AlreadyBlockedError';
     this.bead = bead;
   }
 }
@@ -122,18 +119,24 @@ function requirePositiveInteger(value: number, name: string): void {
 
 function dispatchableReady(beads: readonly Bead[]): Bead[] {
   return beads
-    .filter((bead) => bead.status === "open" &&
-      bead.issue_type !== "epic" &&
-      !bead.labels?.includes("human"))
-    .sort((left, right) => left.priority - right.priority || left.id.localeCompare(right.id));
+    .filter(
+      (bead) =>
+        bead.status === 'open' &&
+        bead.issue_type !== 'epic' &&
+        !bead.labels?.includes('human'),
+    )
+    .sort(
+      (left, right) =>
+        left.priority - right.priority || left.id.localeCompare(right.id),
+    );
 }
 
 function defaultTranscriptPath(kind: string, worktreePath: string): string {
-  return join(worktreePath, ".gis", "run", `transcript-${kind}.unresolved`);
+  return join(worktreePath, '.gis', 'run', `transcript-${kind}.unresolved`);
 }
 
 function handoff(
-  worktree: Pick<BeadWorktree, "path" | "runPath">,
+  worktree: Pick<BeadWorktree, 'path' | 'runPath'>,
   transcriptPath: string,
 ): BeadHandoffLocations {
   return {
@@ -143,7 +146,11 @@ function handoff(
   };
 }
 
-function summaryText(merged: number, blocked: number, humanWaiting: number): string {
+function summaryText(
+  merged: number,
+  blocked: number,
+  humanWaiting: number,
+): string {
   return `${merged}件マージ / ${blocked}件 blocked / ${humanWaiting}件が人間の確認待ち`;
 }
 
@@ -151,7 +158,9 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function agentSession(agent: AgentInfo | undefined): AgentSessionInfo | undefined {
+function agentSession(
+  agent: AgentInfo | undefined,
+): AgentSessionInfo | undefined {
   return agent?.agent_session ?? undefined;
 }
 
@@ -160,17 +169,21 @@ async function findWorkerSession(
   beadId: string,
   herdr: RunHerdrSource,
 ): Promise<AgentSessionInfo | undefined> {
-  const direct = agentSession(started.prompted?.agent) ?? agentSession(started.started?.agent);
+  const direct =
+    agentSession(started.prompted?.agent) ??
+    agentSession(started.started?.agent);
   if (herdr.apiSnapshot === undefined) {
     return direct;
   }
 
   try {
-    const paneId = started.prompted?.agent?.pane_id ?? started.started?.agent?.pane_id;
+    const paneId =
+      started.prompted?.agent?.pane_id ?? started.started?.agent?.pane_id;
     const agents = (await herdr.apiSnapshot()).snapshot.agents;
-    const exactPane = paneId === undefined
-      ? undefined
-      : agents.find((agent) => agent.pane_id === paneId);
+    const exactPane =
+      paneId === undefined
+        ? undefined
+        : agents.find((agent) => agent.pane_id === paneId);
     if (exactPane !== undefined) {
       return agentSession(exactPane);
     }
@@ -183,16 +196,17 @@ async function findWorkerSession(
   }
 }
 
-export function formatRunSummary(summary: Omit<RunSummary, "text">): string {
+export function formatRunSummary(summary: Omit<RunSummary, 'text'>): string {
   return summaryText(summary.merged, summary.blocked, summary.humanWaiting);
 }
 
 function defaultWorkers(herdr: RunHerdrSource): RunWorkerSource {
   return {
-    start: (options) => startWorker({
-      ...options,
-      herdr,
-    }),
+    start: (options) =>
+      startWorker({
+        ...options,
+        herdr,
+      }),
   };
 }
 
@@ -203,36 +217,49 @@ function defaultWorkers(herdr: RunHerdrSource): RunWorkerSource {
  * completion causes a fresh `bd ready`, so closing a bead immediately exposes
  * any newly-unblocked dependents to the next dispatch pass.
  */
-export async function runForegroundLoop(options: RunOptions = {}): Promise<RunSummary> {
+export async function runForegroundLoop(
+  options: RunOptions = {},
+): Promise<RunSummary> {
   const cwd = options.cwd ?? process.cwd();
-  const config = options.config ?? await loadConfig(cwd);
-  requirePositiveInteger(config.concurrency, "concurrency");
+  const config = options.config ?? (await loadConfig(cwd));
+  requirePositiveInteger(config.concurrency, 'concurrency');
 
   const beads = options.beads ?? createBeadsAdapter({ cwd });
   const herdr = options.herdr ?? createHerdrAdapter();
-  const worktrees = options.worktrees ?? {
-    create: (createOptions: CreateBeadWorktreeOptions) => createBeadWorktree({
-      ...createOptions,
-      herdr,
-    }),
-  } satisfies RunWorktreeSource;
+  const worktrees =
+    options.worktrees ??
+    ({
+      create: (createOptions: CreateBeadWorktreeOptions) =>
+        createBeadWorktree({
+          ...createOptions,
+          herdr,
+        }),
+    } satisfies RunWorktreeSource);
   const workers = options.workers ?? defaultWorkers(herdr);
-  const blocked = options.blocked ?? {
-    wait: (waitOptions: Parameters<typeof waitForAgentWithBlockedHandling>[0]) =>
-      waitForAgentWithBlockedHandling(waitOptions),
-  } satisfies RunBlockedSource;
-  const verify = options.verify ?? {
-    verify: (verifyOptions: Parameters<typeof runVerificationLoop>[0]) =>
-      runVerificationLoop(verifyOptions),
-  } satisfies RunVerifySource;
-  const merge = options.merge ?? new SerialMergeQueue({
-    repositoryPath: cwd,
-    baseBranch: config.base,
-    verifyCommand: config.verify,
-    verifyTimeout: config.verify_timeout,
-    beads,
-  });
-  const resolveTranscript = options.resolveTranscript ?? resolveAgentSessionTranscript;
+  const blocked =
+    options.blocked ??
+    ({
+      wait: (
+        waitOptions: Parameters<typeof waitForAgentWithBlockedHandling>[0],
+      ) => waitForAgentWithBlockedHandling(waitOptions),
+    } satisfies RunBlockedSource);
+  const verify =
+    options.verify ??
+    ({
+      verify: (verifyOptions: Parameters<typeof runVerificationLoop>[0]) =>
+        runVerificationLoop(verifyOptions),
+    } satisfies RunVerifySource);
+  const merge =
+    options.merge ??
+    new SerialMergeQueue({
+      repositoryPath: cwd,
+      baseBranch: config.base,
+      verifyCommand: config.verify,
+      verifyTimeout: config.verify_timeout,
+      beads,
+    });
+  const resolveTranscript =
+    options.resolveTranscript ?? resolveAgentSessionTranscript;
   const report = options.report ?? ((message: string) => console.log(message));
   const active = new Map<string, Promise<JobOutcome>>();
   const humanFromWorkers = new Set<string>();
@@ -244,19 +271,21 @@ export async function runForegroundLoop(options: RunOptions = {}): Promise<RunSu
     try {
       worktree = await worktrees.create({ bead, config, cwd, herdr });
     } catch (error: unknown) {
-      report(`gis: worktree creation failed for ${bead.id}: ${errorMessage(error)}`);
+      report(
+        `gis: worktree creation failed for ${bead.id}: ${errorMessage(error)}`,
+      );
       // There is no worktree to retain when creation itself fails. Still
       // persist a deterministic intended handoff so the bead cannot vanish
       // from the run with an in-progress status.
-      const intendedPath = resolve(cwd, ".worktrees", bead.id);
+      const intendedPath = resolve(cwd, '.worktrees', bead.id);
       await beads.markBlocked(
         bead.id,
         handoff(
-          { path: intendedPath, runPath: join(intendedPath, ".gis", "run") },
-          defaultTranscriptPath("unknown", intendedPath),
+          { path: intendedPath, runPath: join(intendedPath, '.gis', 'run') },
+          defaultTranscriptPath('unknown', intendedPath),
         ),
       );
-      return { status: "blocked" };
+      return { status: 'blocked' };
     }
 
     let started: StartedWorker | undefined;
@@ -280,17 +309,23 @@ export async function runForegroundLoop(options: RunOptions = {}): Promise<RunSu
         },
         {
           shouldFallback: (error) =>
-            error instanceof WorkerStartupError && error.phase === "start",
+            error instanceof WorkerStartupError && error.phase === 'start',
         },
       );
       started = selection.result;
       workerKind = selection.candidate.kind;
     } catch (error: unknown) {
-      const phase = error instanceof WorkerStartupError ? error.phase : "startup";
-      report(`gis: worker ${phase} failed for ${bead.id}: ${errorMessage(error)}`);
-      const transcriptPath = defaultTranscriptPath(workerKind ?? "unknown", worktree.path);
+      const phase =
+        error instanceof WorkerStartupError ? error.phase : 'startup';
+      report(
+        `gis: worker ${phase} failed for ${bead.id}: ${errorMessage(error)}`,
+      );
+      const transcriptPath = defaultTranscriptPath(
+        workerKind ?? 'unknown',
+        worktree.path,
+      );
       await beads.markBlocked(bead.id, handoff(worktree, transcriptPath));
-      return { status: "blocked" };
+      return { status: 'blocked' };
     }
 
     const currentTranscriptPath = async (): Promise<string> => {
@@ -299,8 +334,10 @@ export async function runForegroundLoop(options: RunOptions = {}): Promise<RunSu
         if (session === undefined) {
           return defaultTranscriptPath(workerKind!, worktree.path);
         }
-        return await resolveTranscript(session, worktree.path) ??
-          defaultTranscriptPath(workerKind!, worktree.path);
+        return (
+          (await resolveTranscript(session, worktree.path)) ??
+          defaultTranscriptPath(workerKind!, worktree.path)
+        );
       } catch {
         return defaultTranscriptPath(workerKind!, worktree.path);
       }
@@ -326,22 +363,24 @@ export async function runForegroundLoop(options: RunOptions = {}): Promise<RunSu
     } catch (error: unknown) {
       report(`gis: worker wait failed for ${bead.id}: ${errorMessage(error)}`);
       await beads.markBlocked(bead.id, await currentHandoff());
-      return { status: "blocked" };
+      return { status: 'blocked' };
     }
-    if (waitResult.status === "blocked") {
-      return { status: "blocked" };
+    if (waitResult.status === 'blocked') {
+      return { status: 'blocked' };
     }
 
     let result: ResultFileState;
     try {
       result = await readWorkerResult(started.prompt.resultPath);
     } catch (error: unknown) {
-      report(`gis: worker result read failed for ${bead.id}: ${errorMessage(error)}`);
+      report(
+        `gis: worker result read failed for ${bead.id}: ${errorMessage(error)}`,
+      );
       await beads.markBlocked(bead.id, await currentHandoff());
-      return { status: "blocked" };
+      return { status: 'blocked' };
     }
 
-    if (result.kind === "needs_human") {
+    if (result.kind === 'needs_human') {
       const locations = await currentHandoff();
       await beads.markBlocked(bead.id, locations);
       try {
@@ -351,22 +390,23 @@ export async function runForegroundLoop(options: RunOptions = {}): Promise<RunSu
           locations,
         });
         humanFromWorkers.add(gate.id);
-        return { status: "human" };
+        return { status: 'human' };
       } catch {
-        return { status: "blocked" };
+        return { status: 'blocked' };
       }
     }
-    if (result.kind !== "success") {
-      const detail = result.kind === "failure"
-        ? result.result.summary
-        : result.kind === "invalid_schema"
-        ? result.issues.join("; ")
-        : result.kind === "invalid_json"
-        ? result.message
-        : `result file is missing: ${result.path}`;
+    if (result.kind !== 'success') {
+      const detail =
+        result.kind === 'failure'
+          ? result.result.summary
+          : result.kind === 'invalid_schema'
+            ? result.issues.join('; ')
+            : result.kind === 'invalid_json'
+              ? result.message
+              : `result file is missing: ${result.path}`;
       report(`gis: worker result ${result.kind} for ${bead.id}: ${detail}`);
       await beads.markBlocked(bead.id, await currentHandoff());
-      return { status: "blocked" };
+      return { status: 'blocked' };
     }
 
     try {
@@ -383,13 +423,13 @@ export async function runForegroundLoop(options: RunOptions = {}): Promise<RunSu
         herdr,
         waitForWorker: async () => {
           const retry = await blocked.wait(waitOptions);
-          if (retry.status === "blocked") {
+          if (retry.status === 'blocked') {
             throw new AlreadyBlockedError(retry.bead ?? bead);
           }
         },
       });
-      if (verification.status === "blocked") {
-        return { status: "blocked" };
+      if (verification.status === 'blocked') {
+        return { status: 'blocked' };
       }
 
       const finalTranscriptPath = await currentTranscriptPath();
@@ -398,28 +438,28 @@ export async function runForegroundLoop(options: RunOptions = {}): Promise<RunSu
         worktree,
         transcriptPath: finalTranscriptPath,
       });
-      if (mergeResult.status === "merged") {
+      if (mergeResult.status === 'merged') {
         if (mergeResult.stateError !== undefined) {
           report(
             `gis: main contains ${bead.id}, but closing the Beads issue failed; ` +
-            "the worktree was retained for manual reconciliation",
+              'the worktree was retained for manual reconciliation',
           );
         }
         if (mergeResult.cleanupError !== undefined) {
           report(
             `gis: cleanup failed for ${bead.id}; main and bd are merged, ` +
-            "but the worktree was retained for manual recovery",
+              'but the worktree was retained for manual recovery',
           );
         }
-        return { status: "merged" };
+        return { status: 'merged' };
       }
-      return { status: "blocked" };
+      return { status: 'blocked' };
     } catch (error: unknown) {
       if (error instanceof AlreadyBlockedError) {
-        return { status: "blocked" };
+        return { status: 'blocked' };
       }
       await beads.markBlocked(bead.id, await currentHandoff());
-      return { status: "blocked" };
+      return { status: 'blocked' };
     }
   };
 
@@ -429,9 +469,9 @@ export async function runForegroundLoop(options: RunOptions = {}): Promise<RunSu
     } catch (error: unknown) {
       report(
         `gis: job ${bead.id} failed while recording recovery state: ` +
-        (error instanceof Error ? error.message : String(error)),
+          (error instanceof Error ? error.message : String(error)),
       );
-      return { status: "blocked" };
+      return { status: 'blocked' };
     }
   };
 
@@ -453,21 +493,23 @@ export async function runForegroundLoop(options: RunOptions = {}): Promise<RunSu
     }
 
     const completed = await Promise.race(
-      [...active.entries()].map(async ([id, job]) => ({ id, outcome: await job })),
+      [...active.entries()].map(async ([id, job]) => ({
+        id,
+        outcome: await job,
+      })),
     );
     active.delete(completed.id);
-    if (completed.outcome.status === "merged") {
+    if (completed.outcome.status === 'merged') {
       merged += 1;
-    } else if (completed.outcome.status === "blocked") {
+    } else if (completed.outcome.status === 'blocked') {
       blockedCount += 1;
     }
   }
 
-  const humanBeads = beads.listHuman === undefined
-    ? []
-    : await beads.listHuman();
+  const humanBeads =
+    beads.listHuman === undefined ? [] : await beads.listHuman();
   const humanIds = new Set(
-    humanBeads.filter((bead) => bead.status === "open").map((bead) => bead.id),
+    humanBeads.filter((bead) => bead.status === 'open').map((bead) => bead.id),
   );
   for (const id of humanFromWorkers) {
     humanIds.add(id);

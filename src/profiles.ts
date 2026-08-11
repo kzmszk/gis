@@ -1,13 +1,13 @@
-import type { Bead } from "./beads.js";
+import type { Bead } from './beads.js';
 import type {
   ClaudePermissionMode,
   GisConfig,
   ProfileCandidate,
   ProfileConfig,
   ProfileName,
-} from "./config.js";
+} from './config.js';
 
-export type ProfileBead = Pick<Bead, "issue_type" | "labels">;
+export type ProfileBead = Pick<Bead, 'issue_type' | 'labels'>;
 
 export interface CandidateSelectionOptions {
   /** Kinds with an available worker slot. Omit to consider every candidate. */
@@ -33,12 +33,12 @@ export type ProfileAgentStarter<T> = (
 export class ProfileResolutionError extends Error {
   constructor(message: string) {
     super(`profile resolution failed: ${message}`);
-    this.name = "ProfileResolutionError";
+    this.name = 'ProfileResolutionError';
   }
 }
 
-const PROFILE_NAMES: readonly ProfileName[] = ["plan", "implement", "review"];
-const PROFILE_LABEL_PREFIX = "profile:";
+const PROFILE_NAMES: readonly ProfileName[] = ['plan', 'implement', 'review'];
+const PROFILE_LABEL_PREFIX = 'profile:';
 
 function isProfileName(value: string): value is ProfileName {
   return PROFILE_NAMES.includes(value as ProfileName);
@@ -63,7 +63,9 @@ function isAvailable(
   return kinds === undefined || includesKind(kinds, kind);
 }
 
-function profileLabel(labels: readonly string[] | undefined): ProfileName | undefined {
+function profileLabel(
+  labels: readonly string[] | undefined,
+): ProfileName | undefined {
   let override: ProfileName | undefined;
 
   for (const label of labels ?? []) {
@@ -93,7 +95,9 @@ export function resolveProfileName(bead: ProfileBead): ProfileName {
     return override;
   }
 
-  return bead.issue_type === "decision" || bead.issue_type === "epic" ? "plan" : "implement";
+  return bead.issue_type === 'decision' || bead.issue_type === 'epic'
+    ? 'plan'
+    : 'implement';
 }
 
 /** Short alias for callers that already use the profile terminology. */
@@ -113,12 +117,14 @@ export function selectProfileCandidate(
     return candidate;
   }
 
-  throw new ProfileResolutionError("no profile candidate has an available worker slot");
+  throw new ProfileResolutionError(
+    'no profile candidate has an available worker slot',
+  );
 }
 
 export function resolveProfileCandidate(
   bead: ProfileBead,
-  config: Pick<GisConfig, "profiles" | "kinds">,
+  config: Pick<GisConfig, 'profiles' | 'kinds'>,
   options: CandidateSelectionOptions = {},
 ): ProfileCandidate {
   const profile = resolveProfileName(bead);
@@ -129,37 +135,37 @@ export function resolveProfileCandidate(
 }
 
 function permissionMode(
-  config: Pick<GisConfig, "claude_permission_mode"> | ClaudePermissionMode,
+  config: Pick<GisConfig, 'claude_permission_mode'> | ClaudePermissionMode,
 ): ClaudePermissionMode {
-  return typeof config === "string" ? config : config.claude_permission_mode;
+  return typeof config === 'string' ? config : config.claude_permission_mode;
 }
 
 /** Build the arguments appended after `herdr agent start ... --`. */
 export function buildAgentStartArgs(
   candidate: ProfileCandidate,
-  config: Pick<GisConfig, "claude_permission_mode"> | ClaudePermissionMode,
+  config: Pick<GisConfig, 'claude_permission_mode'> | ClaudePermissionMode,
 ): string[] {
-  if (candidate.kind === "claude") {
+  if (candidate.kind === 'claude') {
     return [
-      "--model",
+      '--model',
       candidate.model,
-      "--effort",
+      '--effort',
       candidate.effort,
-      "--permission-mode",
+      '--permission-mode',
       permissionMode(config),
     ];
   }
 
-  if (candidate.kind === "codex") {
+  if (candidate.kind === 'codex') {
     return [
-      "-m",
+      '-m',
       candidate.model,
-      "-c",
-      `model_reasoning_effort=\"${candidate.effort}\"`,
-      "-a",
-      "on-request",
-      "-s",
-      "workspace-write",
+      '-c',
+      `model_reasoning_effort="${candidate.effort}"`,
+      '-a',
+      'on-request',
+      '-s',
+      'workspace-write',
     ];
   }
 
@@ -177,7 +183,7 @@ export const buildStartArgs = buildAgentStartArgs;
  */
 export async function startWithProfileFallback<T>(
   bead: ProfileBead,
-  config: Pick<GisConfig, "profiles" | "kinds" | "claude_permission_mode">,
+  config: Pick<GisConfig, 'profiles' | 'kinds' | 'claude_permission_mode'>,
   start: ProfileAgentStarter<T>,
   options: CandidateSelectionOptions = {},
 ): Promise<ProfileStartResult<T>> {
@@ -188,17 +194,25 @@ export async function startWithProfileFallback<T>(
   let hasError = false;
 
   for (const candidate of candidates) {
-    if (!isAvailable(options.availableKinds ?? config.kinds, candidate.kind) ||
-        includesKind(options.excludeKinds, candidate.kind)) {
+    if (
+      !isAvailable(options.availableKinds ?? config.kinds, candidate.kind) ||
+      includesKind(options.excludeKinds, candidate.kind)
+    ) {
       continue;
     }
 
     attempts += 1;
     try {
-      const result = await start(candidate, buildAgentStartArgs(candidate, config));
+      const result = await start(
+        candidate,
+        buildAgentStartArgs(candidate, config),
+      );
       return { profile, candidate, result, attempts };
     } catch (error: unknown) {
-      if (options.shouldFallback !== undefined && !options.shouldFallback(error)) {
+      if (
+        options.shouldFallback !== undefined &&
+        !options.shouldFallback(error)
+      ) {
         throw error;
       }
       hasError = true;
@@ -209,7 +223,9 @@ export async function startWithProfileFallback<T>(
   if (hasError) {
     throw lastError;
   }
-  throw new ProfileResolutionError("no profile candidate has an available worker slot");
+  throw new ProfileResolutionError(
+    'no profile candidate has an available worker slot',
+  );
 }
 
 export function profileCandidates(

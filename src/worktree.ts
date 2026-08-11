@@ -1,14 +1,14 @@
-import { mkdir } from "node:fs/promises";
-import { join, resolve } from "node:path";
-import type { Bead } from "./beads.js";
-import type { GisConfig } from "./config.js";
+import { mkdir } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
+import type { Bead } from './beads.js';
+import type { GisConfig } from './config.js';
 import {
   createHerdrAdapter,
   type HerdrClient,
   type WorktreeCreatedResult,
   type WorktreeRemoveOptions,
   type WorktreeRemovedResult,
-} from "./herdr.js";
+} from './herdr.js';
 
 export interface WorktreeLifecycleSource {
   worktreeCreate(options: {
@@ -34,16 +34,18 @@ export interface BeadWorktree {
 }
 
 export interface CreateBeadWorktreeOptions {
-  readonly bead: Pick<Bead, "id">;
-  readonly config: Pick<GisConfig, "base">;
+  readonly bead: Pick<Bead, 'id'>;
+  readonly config: Pick<GisConfig, 'base'>;
   readonly cwd?: string;
   readonly herdr?: WorktreeLifecycleSource;
 }
 
-export type BeadWorktreeOperation<T> = (worktree: BeadWorktree) => Promise<T> | T;
+export type BeadWorktreeOperation<T> = (
+  worktree: BeadWorktree,
+) => Promise<T> | T;
 
 function requireNonEmpty(value: string, name: string): void {
-  if (typeof value !== "string" || value.trim().length === 0) {
+  if (typeof value !== 'string' || value.trim().length === 0) {
     throw new TypeError(`${name} must not be empty`);
   }
 }
@@ -61,12 +63,12 @@ function defaultHerdr(): WorktreeLifecycleSource {
 export async function createBeadWorktree(
   options: CreateBeadWorktreeOptions,
 ): Promise<BeadWorktree> {
-  requireNonEmpty(options.bead.id, "bead.id");
-  requireNonEmpty(options.config.base, "config.base");
+  requireNonEmpty(options.bead.id, 'bead.id');
+  requireNonEmpty(options.config.base, 'config.base');
 
   const herdr = options.herdr ?? defaultHerdr();
   const cwd = resolve(options.cwd ?? process.cwd());
-  const requestedPath = resolve(cwd, ".worktrees", options.bead.id);
+  const requestedPath = resolve(cwd, '.worktrees', options.bead.id);
   const created = await herdr.worktreeCreate({
     branch: options.bead.id,
     base: options.config.base,
@@ -74,7 +76,7 @@ export async function createBeadWorktree(
     path: requestedPath,
   });
   const path = resolve(cwd, created.worktree.path);
-  const runPath = join(path, ".gis", "run");
+  const runPath = join(path, '.gis', 'run');
 
   // If preparation fails, the created worktree remains available for
   // inspection and manual recovery; there is intentionally no cleanup here.
@@ -84,14 +86,16 @@ export async function createBeadWorktree(
   const remove = async (): Promise<WorktreeRemovedResult> => {
     if (removed) {
       return {
-        type: "worktree_removed",
+        type: 'worktree_removed',
         workspace_id: created.workspace.workspace_id,
         path,
         forced: true,
       };
     }
 
-    const result = await herdr.worktreeRemove(created.workspace.workspace_id, { force: true });
+    const result = await herdr.worktreeRemove(created.workspace.workspace_id, {
+      force: true,
+    });
     removed = true;
     return result;
   };
@@ -108,7 +112,9 @@ export async function createBeadWorktree(
 }
 
 /** Remove a successfully completed bead worktree and its herdr pane. */
-export function removeBeadWorktree(worktree: BeadWorktree): Promise<WorktreeRemovedResult> {
+export function removeBeadWorktree(
+  worktree: BeadWorktree,
+): Promise<WorktreeRemovedResult> {
   return worktree.remove();
 }
 
