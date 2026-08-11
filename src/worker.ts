@@ -17,8 +17,11 @@ import {
 } from './config.js';
 import { buildAgentStartArgs } from './profiles.js';
 
-/** The only text that gis injects into a worker's interactive TUI. */
-export const WORKER_PROMPT = 'Read .gis/run/prompt.md and execute it.';
+/** The only text that gis injects into an implementation worker's TUI. */
+export const WORKER_PROMPT =
+  'Read .gis/run/implement-prompt.md and execute it.';
+/** The only text that gis injects into a reviewer worker's TUI. */
+export const REVIEWER_PROMPT = 'Read .gis/run/review-prompt.md and execute it.';
 const MAX_AGENT_START_TIMEOUT_MS = 300_000;
 const MIN_AGENT_START_TIMEOUT_MS = 3_000;
 const AGENT_READY_POLL_MS = 50;
@@ -35,6 +38,18 @@ export interface WorkerPromptOptions {
   readonly round?: number;
   /** Verification output that the worker should address on a retry. */
   readonly verificationFeedback?: string;
+  /** Prompt role. Implementation is the default for backwards compatibility. */
+  readonly role?: 'implement' | 'review';
+  /** Kind used by the implementation worker when this is a review prompt. */
+  readonly implementationKind?: string;
+  /** Review findings to address on a subsequent review round. */
+  readonly reviewFeedback?: string;
+  /** Phase suffix used to keep implementation result files distinct. */
+  readonly phase?: 'verify' | 'review-fix';
+  /** Namespace used to retain verification attempts across review cycles. */
+  readonly verificationCycle?: VerificationCycle;
+  /** Verification attempt represented by this retry prompt. */
+  readonly verificationAttempt?: number;
 }
 
 export interface WorkerPrompt {
@@ -77,6 +92,17 @@ export interface StartWorkerOptions extends WorkerPromptOptions {
   /** Test seam for Herdr versions that leave an otherwise-idle agent launch-pending. */
   readonly idleReadinessFallbackMs?: number;
 }
+
+export type WorkerRole = 'implement' | 'review';
+
+export type VerificationCycle =
+  | { readonly kind: 'initial' }
+  | { readonly kind: 'review'; readonly round: number };
+
+export type ReviewVerificationCycle = Extract<
+  VerificationCycle,
+  { readonly kind: 'review' }
+>;
 
 export interface StartedWorker {
   readonly prompt: WorkerPrompt;
@@ -155,12 +181,65 @@ function verificationFeedback(value: string | undefined): string[] {
   ];
 }
 
+function reviewFeedback(
+  value: string | undefined,
+  role: WorkerRole = 'review',
+): string[] {
+  if (value === undefined || value.trim().length === 0) {
+    return [];
+  }
+
+  return [
+    '## Previous review findings',
+    '',
+    value.trim(),
+    '',
+    role === 'implement'
+      ? 'Address the findings above, run verification, and write the implementation result.'
+      : 'Re-check the implementation after the requested fixes and write a new review result.',
+    '',
+  ];
+}
+
 function promptContent(
   options: WorkerPromptOptions,
   resultRelativePath: string,
   runId: string,
 ): string {
   const { bead } = options;
+  const role: WorkerRole = options.role ?? 'implement';
+  if (role === 'review') {
+    return [
+      '# gis reviewer task',
+      '',
+      `- Bead ID: \`${bead.id}\``,
+      `- Run ID: \`${runId}\``,
+      `- Implementation agent kind: \`${options.implementationKind ?? 'unknown'}\``,
+      '',
+      '## Task',
+      '',
+      'Review the implementation currently checked out in this worktree against the task and acceptance criteria.',
+      'Do not modify files and do not commit changes. Inspect the diff and relevant tests carefully.',
+      '',
+      bead.description.trim(),
+      '',
+      '## Acceptance criteria',
+      '',
+      acceptanceCriteria(bead.acceptance_criteria),
+      '',
+      '## Verification',
+      '',
+      `Run this command while reviewing: \`${options.verifyCommand}\``,
+      '',
+      ...reviewFeedback(options.reviewFeedback),
+      '## Result file',
+      '',
+      `Before finishing, write a JSON result to \`${resultRelativePath}\`.`,
+      `The object must contain \`run_id\` exactly equal to \`${runId}\`, \`status\` (\`done\` or \`failed\`), a concise \`summary\`, and \`verdict\` (\`approved\` or \`changes_requested\`).`,
+      'For changes_requested, include a concrete `feedback` string describing every required fix. Use `needs_human` if a human decision is required.',
+      '',
+    ].join('\n');
+  }
   return [
     '# gis worker task',
     '',
@@ -193,6 +272,7 @@ function promptContent(
     'Do not push the branch, and do not run `bd dolt push`.',
     'Do not close, reopen, or otherwise change the Bead status; GIS owns task-state transitions.',
     '',
+    ...reviewFeedback(options.reviewFeedback, 'implement'),
     ...verificationFeedback(options.verificationFeedback),
     '## Result file',
     '',
@@ -202,6 +282,45 @@ function promptContent(
     'If a human must decide or intervene, also include `needs_human` with the reason.',
     '',
   ].join('\n');
+}
+
+function resultSuffix(options: WorkerPromptOptions): string {
+  const role: WorkerRole = options.role ?? 'implement';
+  if (role === 'review') {
+    return 'review';
+  }
+  if (options.phase === 'verify') {
+    const cycle = verificationCycleName(options.verificationCycle);
+    const attempt = options.verificationAttempt;
+    if (attempt === undefined) {
+      return `impl-verify-${cycle}`;
+    }
+    if (!Number.isSafeInteger(attempt) || attempt <= 0) {
+      throw new RangeError('verificationAttempt must be a positive integer');
+    }
+    return `impl-verify-${cycle}-attempt-${attempt}`;
+  }
+  if (options.phase === 'review-fix') {
+    return 'impl-review-fix';
+  }
+  return 'impl';
+}
+
+function verificationCycleName(cycle: VerificationCycle | undefined): string {
+  if (cycle === undefined || cycle.kind === 'initial') {
+    return 'initial';
+  }
+  if (!Number.isSafeInteger(cycle.round) || cycle.round <= 0) {
+    throw new RangeError('verification cycle round must be a positive integer');
+  }
+  return `review-${cycle.round}`;
+}
+
+export function workerPromptForRole(role: WorkerRole): string {
+  if (role === 'review') {
+    return REVIEWER_PROMPT;
+  }
+  return WORKER_PROMPT;
 }
 
 /** Write the complete worker instructions to the worktree filesystem. */
@@ -214,9 +333,13 @@ export async function writeWorkerPrompt(
   requireNonEmpty(options.verifyCommand, 'verifyCommand');
 
   const round = roundNumber(options.round);
-  const resultRelativePath = `.gis/run/round-${round}-impl.json`;
-  const path = join(options.runPath, 'prompt.md');
-  const resultPath = join(options.runPath, `round-${round}-impl.json`);
+  const role: WorkerRole = options.role ?? 'implement';
+  const suffix = resultSuffix(options);
+  const resultRelativePath = `.gis/run/round-${round}-${suffix}.json`;
+  const promptName =
+    role === 'review' ? 'review-prompt.md' : 'implement-prompt.md';
+  const path = join(options.runPath, promptName);
+  const resultPath = join(options.runPath, `round-${round}-${suffix}.json`);
   const runId = randomUUID();
   const content = promptContent(options, resultRelativePath, runId);
 
@@ -345,7 +468,7 @@ export async function promptWorker(
   const herdr = options.herdr ?? defaultHerdr();
   const prompted = await herdr.agentPrompt(
     options.target,
-    WORKER_PROMPT,
+    workerPromptForRole(options.role ?? 'implement'),
     promptAcceptanceOptions(PROMPT_ACCEPT_TIMEOUT_MS),
   );
   return { prompt, prompted };
@@ -442,7 +565,7 @@ export async function startWorker(
     prompted = await beforeDeadline(
       herdr.agentPrompt(
         options.agentName,
-        WORKER_PROMPT,
+        workerPromptForRole(options.role ?? 'implement'),
         promptAcceptanceOptions(promptTimeoutMs),
       ),
       deadline,

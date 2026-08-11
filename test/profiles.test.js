@@ -180,3 +180,27 @@ test('does not try unavailable candidates during fallback', async () => {
   assert.equal(result.candidate.kind, 'codex');
   assert.deepEqual(attempts, ['codex']);
 });
+
+test('uses an explicit pipeline profile when returning a start result', async () => {
+  const config = parseConfig(`
+kinds = ["claude", "codex"]
+[[profiles.implement]]
+kind = "codex"
+model = "implementation"
+effort = "low"
+[[profiles.review]]
+kind = "claude"
+model = "review"
+effort = "high"
+`);
+  const result = await startWithProfileFallback(
+    task(),
+    config,
+    async (candidate) => candidate.model,
+    { profile: 'review' },
+  );
+
+  assert.equal(result.profile, 'review');
+  assert.equal(result.candidate.kind, 'claude');
+  assert.equal(result.result, 'review');
+});

@@ -11,7 +11,11 @@ import {
   type MergeResult,
 } from './merge.js';
 import { startWithProfileFallback } from './profiles.js';
-import { readWorkerResult, type ResultFileState } from './result.js';
+import {
+  readWorkerResult,
+  workerResultProblemDetail,
+  type ResultFileState,
+} from './result.js';
 import { resolveAgentSessionTranscript } from './transcripts.js';
 import {
   waitForAgentWithBlockedHandling,
@@ -32,8 +36,12 @@ import {
   type StartedWorker,
   type WorkerPromptSource,
   type WorkerStartupSource,
+  type VerificationCycle,
   WorkerStartupError,
 } from './worker.js';
+import type { ReviewHerdrSource, StartedReviewer } from './review.js';
+import { runReviewLoop } from './review-loop.js';
+import type { ProfileCandidate } from './config.js';
 
 export interface RunBeadsSource {
   ready(): Promise<readonly Bead[]>;
@@ -47,7 +55,10 @@ export interface RunBeadsSource {
 export type RunHerdrSource = WorktreeLifecycleSource &
   WorkerStartupSource &
   WorkerPromptSource &
-  BlockedHerdrSource;
+  BlockedHerdrSource & {
+    /** Herdr pane.split is required only when review=true. */
+    paneSplit?: ReviewHerdrSource['paneSplit'];
+  };
 
 export interface RunWorktreeSource {
   create(options: CreateBeadWorktreeOptions): Promise<BeadWorktree>;
@@ -274,6 +285,26 @@ async function findWorkerSession(
   }
 }
 
+async function resolveWorkerTranscriptPath(
+  started: StartedWorker,
+  agentName: string,
+  kind: string,
+  worktreePath: string,
+  herdr: RunHerdrSource,
+  resolveTranscript: NonNullable<RunOptions['resolveTranscript']>,
+): Promise<string> {
+  const fallback = defaultTranscriptPath(kind, worktreePath);
+  try {
+    const session = await findWorkerSession(started, agentName, herdr);
+    if (session === undefined) {
+      return fallback;
+    }
+    return (await resolveTranscript(session, worktreePath)) ?? fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 export function formatRunSummary(summary: Omit<RunSummary, 'text'>): string {
   return summaryText(summary.merged, summary.blocked, summary.humanWaiting);
 }
@@ -399,6 +430,7 @@ export async function runForegroundLoop(
 
     let started: StartedWorker | undefined;
     let workerKind: string | undefined;
+    let implementationCandidate: ProfileCandidate | undefined;
     try {
       const selection = await startWithProfileFallback(
         bead,
@@ -424,6 +456,7 @@ export async function runForegroundLoop(
       );
       started = selection.result;
       workerKind = selection.candidate.kind;
+      implementationCandidate = selection.candidate;
     } catch (error: unknown) {
       const phase =
         error instanceof WorkerStartupError ? error.phase : 'startup';
@@ -438,20 +471,15 @@ export async function runForegroundLoop(
       return { status: 'blocked' };
     }
 
-    const currentTranscriptPath = async (): Promise<string> => {
-      try {
-        const session = await findWorkerSession(started, agentName, herdr);
-        if (session === undefined) {
-          return defaultTranscriptPath(workerKind!, worktree.path);
-        }
-        return (
-          (await resolveTranscript(session, worktree.path)) ??
-          defaultTranscriptPath(workerKind!, worktree.path)
-        );
-      } catch {
-        return defaultTranscriptPath(workerKind!, worktree.path);
-      }
-    };
+    const currentTranscriptPath = (): Promise<string> =>
+      resolveWorkerTranscriptPath(
+        started,
+        agentName,
+        workerKind!,
+        worktree.path,
+        herdr,
+        resolveTranscript,
+      );
     const currentHandoff = async (): Promise<BeadHandoffLocations> =>
       handoff(worktree, await currentTranscriptPath());
     const waitOptions = {
@@ -511,28 +539,20 @@ export async function runForegroundLoop(
       }
     }
     if (result.kind !== 'success') {
-      const detail =
-        result.kind === 'failure'
-          ? result.result.summary
-          : result.kind === 'invalid_schema'
-            ? result.issues.join('; ')
-            : result.kind === 'invalid_json'
-              ? result.message
-              : result.kind === 'stale'
-                ? `result file belongs to another run: ${result.path}`
-                : `result file is missing: ${result.path}`;
+      const detail = workerResultProblemDetail(result);
       report(`gis: worker result ${result.kind} for ${bead.id}: ${detail}`);
       await beads.markBlocked(bead.id, await currentHandoff());
       return { status: 'blocked' };
     }
 
-    try {
-      const transcriptPath = await currentTranscriptPath();
+    const verifyImplementation = async (
+      verificationCycle: VerificationCycle = { kind: 'initial' },
+    ): Promise<'verified' | 'blocked'> => {
       const verification = await verify.verify({
         bead,
         worktreePath: worktree.path,
         runPath: worktree.runPath,
-        transcriptPath,
+        transcriptPath: await currentTranscriptPath(),
         resolveTranscriptPath: currentTranscriptPath,
         config,
         beads,
@@ -544,9 +564,56 @@ export async function runForegroundLoop(
             throw new AlreadyBlockedError(retry.bead ?? bead);
           }
         },
+        verificationCycle,
       });
-      if (verification.status === 'blocked') {
+      return verification.status;
+    };
+
+    try {
+      if ((await verifyImplementation({ kind: 'initial' })) === 'blocked') {
         return { status: 'blocked' };
+      }
+
+      if (config.review) {
+        const reviewerTranscriptPath = (
+          reviewer: StartedReviewer,
+        ): Promise<string> =>
+          resolveWorkerTranscriptPath(
+            reviewer.selection.result,
+            reviewer.agentName,
+            reviewer.selection.candidate.kind,
+            worktree.path,
+            herdr,
+            resolveTranscript,
+          );
+        const reviewOutcome = await runReviewLoop({
+          bead,
+          worktree,
+          config,
+          implementation: {
+            agentName,
+            kind: workerKind!,
+            candidate: implementationCandidate,
+          },
+          herdr: herdr as ReviewHerdrSource,
+          beads,
+          blocked,
+          implementationWaitOptions: waitOptions,
+          implementationHandoff: currentHandoff,
+          reviewerTranscriptPath,
+          verifyImplementation,
+          onHumanGate: (gate, locations) => {
+            humanFromWorkers.set(gate.id, gate);
+            notifyHumanBeads(
+              new Map([[gate.id, gate]]),
+              locations.worktreePath,
+            );
+          },
+          report,
+        });
+        if (reviewOutcome !== 'approved') {
+          return { status: reviewOutcome };
+        }
       }
 
       const finalTranscriptPath = await currentTranscriptPath();

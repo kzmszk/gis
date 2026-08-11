@@ -31,6 +31,28 @@ export interface WorktreeRemoveOptions {
   force?: boolean;
 }
 
+/** Options accepted by Herdr's pane.split API. */
+export interface PaneSplitOptions {
+  targetPaneId?: string;
+  workspaceId?: string;
+  direction?: 'right' | 'down';
+  ratio?: number;
+  cwd?: string;
+  focus?: boolean;
+  env?: Readonly<Record<string, string>>;
+}
+
+/** Herdr returns a pane object in current releases, with older releases
+ * returning the pane id at the top level. Keep the response open-ended so a
+ * caller can extract the id across both protocol revisions. */
+export interface PaneSplitResult {
+  type?: 'pane_split' | string;
+  pane?: PaneInfo;
+  pane_id?: string;
+  new_pane?: PaneInfo;
+  [key: string]: unknown;
+}
+
 export interface AgentStartOptions {
   name: string;
   kind: string;
@@ -336,6 +358,23 @@ export class HerdrClient {
     const params: Record<string, unknown> = { workspace_id: workspaceId };
     addIfDefined(params, 'force', options.force);
     return this.request<WorktreeRemovedResult>('worktree.remove', params);
+  }
+
+  paneSplit(options: PaneSplitOptions = {}): Promise<PaneSplitResult> {
+    const params: Record<string, unknown> = {
+      direction: options.direction ?? 'right',
+    };
+    addIfDefined(params, 'target_pane_id', options.targetPaneId);
+    addIfDefined(params, 'workspace_id', options.workspaceId);
+    addIfDefined(params, 'ratio', options.ratio);
+    addIfDefined(params, 'cwd', options.cwd);
+    addIfDefined(params, 'focus', options.focus);
+    addIfDefined(
+      params,
+      'env',
+      options.env === undefined ? undefined : { ...options.env },
+    );
+    return this.request<PaneSplitResult>('pane.split', params);
   }
 
   agentStart(options: AgentStartOptions): Promise<AgentStartedResult>;

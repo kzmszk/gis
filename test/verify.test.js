@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -110,16 +110,16 @@ test('retries in the same pane and records verification feedback in the next rou
     assert.deepEqual(prompts, [
       {
         target: bead.id,
-        text: 'Read .gis/run/prompt.md and execute it.',
+        text: 'Read .gis/run/implement-prompt.md and execute it.',
         promptOptions: { wait: { until: ['working'], timeoutMs: 10_000 } },
       },
     ]);
     assert.deepEqual(waits, [true]);
-    const prompt = await readFile(join(runPath, 'prompt.md'), 'utf8');
+    const prompt = await readFile(join(runPath, 'implement-prompt.md'), 'utf8');
     assert.match(prompt, /Previous verification failure/);
     assert.match(prompt, /1 failing test/);
     assert.match(prompt, /AssertionError/);
-    assert.match(prompt, /round-2-impl\.json/);
+    assert.match(prompt, /round-2-impl-verify-initial-attempt-2\.json/);
   });
 });
 
@@ -177,6 +177,56 @@ test('blocks exactly at verify_max without an extra retry and keeps all three ha
         },
       },
     ]);
+  });
+});
+
+test('retains verify retry artifacts across review cycles', async () => {
+  await withRunPath(async ({ root, runPath }) => {
+    const resultPaths = [];
+    for (const reviewRound of [1, 2]) {
+      let attempts = 0;
+      const result = await runVerificationLoop(
+        options({
+          worktreePath: root,
+          runPath,
+          verificationCycle: { kind: 'review', round: reviewRound },
+          runVerify: async () => {
+            attempts += 1;
+            return { passed: attempts === 2 };
+          },
+          herdr: {
+            async agentPrompt() {
+              const prompt = await readFile(
+                join(runPath, 'implement-prompt.md'),
+                'utf8',
+              );
+              const resultRelative = /write a JSON result to `([^`]+)`/.exec(
+                prompt,
+              )?.[1];
+              assert.ok(resultRelative);
+              const resultPath = join(root, resultRelative);
+              resultPaths.push(resultPath);
+              await writeFile(resultPath, '{}', 'utf8');
+              return {};
+            },
+          },
+        }),
+      );
+      assert.equal(result.status, 'verified');
+    }
+
+    assert.equal(resultPaths.length, 2);
+    assert.notEqual(resultPaths[0], resultPaths[1]);
+    assert.match(
+      resultPaths[0],
+      /round-2-impl-verify-review-1-attempt-2\.json$/,
+    );
+    assert.match(
+      resultPaths[1],
+      /round-2-impl-verify-review-2-attempt-2\.json$/,
+    );
+    assert.equal(await readFile(resultPaths[0], 'utf8'), '{}');
+    assert.equal(await readFile(resultPaths[1], 'utf8'), '{}');
   });
 });
 

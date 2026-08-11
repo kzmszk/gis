@@ -34,7 +34,12 @@ function workspaceIdFor(
 }
 
 async function currentResult(worktreePath: string) {
-  const promptPath = resolve(worktreePath, '.gis', 'run', 'prompt.md');
+  const promptPath = resolve(
+    worktreePath,
+    '.gis',
+    'run',
+    'implement-prompt.md',
+  );
   const prompt = await readFile(promptPath, 'utf8');
   const resultRelative = /write a JSON result to `([^`]+)`/.exec(prompt)?.[1];
   if (resultRelative === undefined) return undefined;

@@ -77,7 +77,7 @@ function startOptions(root, overrides = {}) {
   };
 }
 
-test('writes the detailed worker instructions and result protocol to prompt.md', async () => {
+test('writes implementation instructions to the role-specific prompt file', async () => {
   const root = await mkdtemp(join(tmpdir(), 'gis-worker-prompt-'));
   try {
     const prompt = await writeWorkerPrompt({
@@ -87,7 +87,7 @@ test('writes the detailed worker instructions and result protocol to prompt.md',
       round: 2,
     });
 
-    assert.equal(prompt.path, join(root, '.gis', 'run', 'prompt.md'));
+    assert.equal(prompt.path, join(root, '.gis', 'run', 'implement-prompt.md'));
     assert.equal(
       prompt.resultPath,
       join(root, '.gis', 'run', 'round-2-impl.json'),
@@ -128,7 +128,7 @@ test('writes the detailed worker instructions and result protocol to prompt.md',
   }
 });
 
-test('starts the worker after writing prompt.md and injects exactly one TUI line', async () => {
+test('starts the worker after writing the implementation prompt and injects one TUI line', async () => {
   const root = await mkdtemp(join(tmpdir(), 'gis-worker-start-'));
   const calls = [];
   let agentStarted = false;
@@ -191,8 +191,66 @@ test('starts the worker after writing prompt.md and injects exactly one TUI line
     assert.deepEqual(calls[3].options.wait.until, ['working']);
     assert.ok(calls[3].options.wait.timeoutMs >= 299_000);
     assert.ok(calls[3].options.wait.timeoutMs <= 300_000);
-    assert.equal(WORKER_PROMPT, 'Read .gis/run/prompt.md and execute it.');
+    assert.equal(
+      WORKER_PROMPT,
+      'Read .gis/run/implement-prompt.md and execute it.',
+    );
     assert.equal(calls.filter((call) => call.type === 'prompt').length, 1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('keeps verification and review-fix result files separate for one round', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'gis-worker-phases-'));
+  try {
+    const verify = await writeWorkerPrompt({
+      bead,
+      runPath: join(root, '.gis', 'run'),
+      verifyCommand: 'npm test',
+      round: 2,
+      phase: 'verify',
+    });
+    const reviewFix = await writeWorkerPrompt({
+      bead,
+      runPath: join(root, '.gis', 'run'),
+      verifyCommand: 'npm test',
+      round: 2,
+      phase: 'review-fix',
+      reviewFeedback: 'Handle the reported issue.',
+    });
+
+    assert.notEqual(verify.resultPath, reviewFix.resultPath);
+    assert.match(
+      verify.resultRelativePath,
+      /round-2-impl-verify-initial\.json$/,
+    );
+    assert.match(
+      reviewFix.resultRelativePath,
+      /round-2-impl-review-fix\.json$/,
+    );
+    assert.equal(
+      await readFile(join(root, '.gis', 'run', 'implement-prompt.md'), 'utf8'),
+      reviewFix.content,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('uses a separate reviewer prompt file', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'gis-review-prompt-file-'));
+  try {
+    const prompt = await writeWorkerPrompt({
+      bead,
+      runPath: join(root, '.gis', 'run'),
+      verifyCommand: 'npm test',
+      role: 'review',
+    });
+
+    assert.equal(prompt.path, join(root, '.gis', 'run', 'review-prompt.md'));
+    assert.equal(await readFile(prompt.path, 'utf8'), prompt.content);
+    assert.match(prompt.content, /gis reviewer task/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

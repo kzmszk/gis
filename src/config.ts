@@ -34,8 +34,6 @@ export interface GisConfig {
   readonly profiles: ProfileConfig;
 }
 
-export type ConfigWarningSink = (message: string) => void;
-
 export class ConfigError extends Error {
   constructor(message: string, options?: ErrorOptions) {
     super(`invalid gis configuration: ${message}`, options);
@@ -337,11 +335,6 @@ export async function readConfig(cwd: string = process.cwd()): Promise<string> {
 
 export async function loadConfig(
   cwd: string = process.cwd(),
-  warn: ConfigWarningSink = (message) => console.warn(message),
 ): Promise<GisConfig> {
-  const config = parseConfig(await readConfig(cwd));
-  if (config.review) {
-    warn('review=true is not implemented yet');
-  }
-  return config;
+  return parseConfig(await readConfig(cwd));
 }

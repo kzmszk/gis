@@ -3,7 +3,11 @@ import type { ExecException } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { Bead, BeadHandoffLocations } from './beads.js';
 import { parseDurationMs, type GisConfig } from './config.js';
-import { promptWorker, type WorkerPromptSource } from './worker.js';
+import {
+  promptWorker,
+  type VerificationCycle,
+  type WorkerPromptSource,
+} from './worker.js';
 
 const execAsync = promisify(exec);
 const VERIFY_MAX_BUFFER = 10 * 1024 * 1024;
@@ -41,6 +45,8 @@ export interface VerifyLoopOptions {
   /** The caller waits for the worker's initial completion before entering this loop. */
   readonly waitForWorker?: () => Promise<void>;
   readonly runVerify?: VerifyCommandRunner;
+  /** Namespace that separates retries from prior review cycles. */
+  readonly verificationCycle?: VerificationCycle;
 }
 
 export interface VerifyLoopVerifiedResult {
@@ -204,6 +210,9 @@ export async function runVerificationLoop(
       runPath: options.runPath,
       verifyCommand: options.config.verify,
       round: attempt + 1,
+      phase: 'verify',
+      verificationCycle: options.verificationCycle,
+      verificationAttempt: attempt + 1,
       verificationFeedback: failureFeedback(options.config.verify, result),
       target,
       herdr: options.herdr,

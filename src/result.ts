@@ -47,6 +47,11 @@ export type ResultFileState =
 
 export type WorkerResultOutcome = ResultFileState;
 
+export type WorkerResultProblem = Exclude<
+  ResultFileState,
+  { readonly kind: 'success' } | { readonly kind: 'needs_human' }
+>;
+
 function requirePath(path: string): void {
   if (typeof path !== 'string' || path.trim().length === 0) {
     throw new TypeError('result path must not be empty');
@@ -55,6 +60,27 @@ function requirePath(path: string): void {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function assertNever(value: never): never {
+  throw new Error(`unhandled worker result: ${JSON.stringify(value)}`);
+}
+
+export function workerResultProblemDetail(result: WorkerResultProblem): string {
+  switch (result.kind) {
+    case 'failure':
+      return result.result.summary;
+    case 'invalid_schema':
+      return result.issues.join('; ');
+    case 'invalid_json':
+      return result.message;
+    case 'stale':
+      return `result file belongs to another run: ${result.path}`;
+    case 'missing':
+      return `result file is missing: ${result.path}`;
+    default:
+      return assertNever(result);
+  }
 }
 
 function schemaIssues(value: unknown): string[] {
