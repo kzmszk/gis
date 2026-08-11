@@ -3,17 +3,28 @@
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { loadConfig } from './config.js';
+import { initializeProject, type InitResult } from './init.js';
 import { reconcileStartup } from './recovery.js';
 import { recoverLateCompletions } from './late-recovery.js';
 import { runForegroundLoop, type RunSummary } from './run.js';
 
 export { readConfig } from './config.js';
 
-export async function main(args: string[]): Promise<RunSummary> {
+export async function main(args: string[]): Promise<RunSummary | InitResult> {
   const [command, ...unexpectedArgs] = args;
 
+  if (command === 'init') {
+    if (
+      unexpectedArgs.length > 1 ||
+      (unexpectedArgs.length === 1 && unexpectedArgs[0] !== '--defaults')
+    ) {
+      throw new Error('usage: gis init [--defaults]');
+    }
+    return initializeProject({ defaults: unexpectedArgs[0] === '--defaults' });
+  }
+
   if (command !== 'run' || unexpectedArgs.length > 0) {
-    throw new Error('usage: gis run');
+    throw new Error('usage: gis <init [--defaults] | run>');
   }
 
   const cwd = process.cwd();
