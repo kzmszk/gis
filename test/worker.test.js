@@ -36,8 +36,13 @@ test("writes the detailed worker instructions and result protocol to prompt.md",
     assert.match(prompt.content, /\.gis\/run\/round-2-impl\.json/);
     assert.match(prompt.content, /status.*done.*failed/s);
     assert.match(prompt.content, /Commit all intended implementation changes/);
-    assert.match(prompt.content, /explicitly authorizes one task commit/);
+    assert.match(prompt.content, /explicitly authorizes the task-scoped commits needed/);
+    assert.doesNotMatch(prompt.content, /one task commit/);
     assert.match(prompt.content, /overrides any conservative or no-git default/);
+    assert.match(prompt.content, /Do not bypass or disable Git hooks/);
+    assert.match(prompt.content, /--no-verify/);
+    assert.match(prompt.content, /restage the intended changes, rerun verification, and retry the commit/);
+    assert.match(prompt.content, /git status --porcelain.*empty/);
     assert.match(prompt.content, /Do not push the branch/);
     assert.match(prompt.content, /GIS owns task-state transitions/);
   } finally {

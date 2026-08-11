@@ -180,7 +180,9 @@ verify は無料（数十秒の CPU）、レビューは有料（サブスク枠
 個別に通ったブランチ同士が合流すると壊れる、というのが並列開発の主要な失敗モードである。
 これは**捨ててはいけない複雑さ**（Gas Town の Refinery が存在する理由もここ）。
 ワーカーには、Beads の保守的な既定表示より当該 task の明示的な commit 権限が
-優先すること、push はしないこと、変更を commit してから完了報告することを指示し、
+優先すること、当該 branch で task 完了に必要な commit は許可するが push はしないこと、
+pre-commit hook は迂回せず、formatter/lint が変更または拒否した場合は再 stage・再 verify・
+再 commit すること、clean な worktree で完了報告することを指示する。
 Bead の status 遷移は GIS が所有してワーカー自身には変更させない。マージキューでも
 `base..HEAD` が空でないことを検証する。変更ゼロのブランチを成功扱いして bead を close しない。
 
