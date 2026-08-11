@@ -1,21 +1,15 @@
-import { join, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import type { Bead, BeadHandoffLocations, HumanGateRequest } from './beads.js';
 import { createBeadsAdapter } from './beads.js';
 import type { GisConfig } from './config.js';
-import { loadConfig, parseDurationMs } from './config.js';
+import { loadConfig } from './config.js';
 import { createHerdrAdapter } from './herdr.js';
-import type { AgentInfo, AgentSessionInfo } from './herdr.js';
+import type { AgentSessionInfo } from './herdr.js';
 import {
   SerialMergeQueue,
   type MergeQueueItem,
   type MergeResult,
 } from './merge.js';
-import { startWithProfileFallback } from './profiles.js';
-import {
-  readWorkerResult,
-  workerResultProblemDetail,
-  type ResultFileState,
-} from './result.js';
 import { resolveAgentSessionTranscript } from './transcripts.js';
 import {
   waitForAgentWithBlockedHandling,
@@ -31,17 +25,13 @@ import {
 import type { WorktreeLifecycleSource } from './worktree.js';
 import {
   startWorker,
-  herdrAgentName,
   type StartWorkerOptions,
   type StartedWorker,
   type WorkerPromptSource,
   type WorkerStartupSource,
-  type VerificationCycle,
-  WorkerStartupError,
 } from './worker.js';
-import type { ReviewHerdrSource, StartedReviewer } from './review.js';
-import { runReviewLoop } from './review-loop.js';
-import type { ProfileCandidate } from './config.js';
+import type { ReviewHerdrSource } from './review.js';
+import { createBeadJobProcessor, type JobOutcome } from './run-worker.js';
 
 export interface RunBeadsSource {
   ready(): Promise<readonly Bead[]>;
@@ -160,21 +150,6 @@ export function formatHumanGateNotification(
   return lines.join('\n');
 }
 
-type JobOutcome =
-  | { readonly status: 'merged' }
-  | { readonly status: 'blocked' }
-  | { readonly status: 'human' };
-
-class AlreadyBlockedError extends Error {
-  readonly bead: Bead;
-
-  constructor(bead: Bead) {
-    super(`worker for ${bead.id} entered blocked state`);
-    this.name = 'AlreadyBlockedError';
-    this.bead = bead;
-  }
-}
-
 function requirePositiveInteger(value: number, name: string): void {
   if (!Number.isSafeInteger(value) || value <= 0) {
     throw new RangeError(`${name} must be a positive integer`);
@@ -195,21 +170,6 @@ function dispatchableReady(beads: readonly Bead[]): Bead[] {
     );
 }
 
-function defaultTranscriptPath(kind: string, worktreePath: string): string {
-  return join(worktreePath, '.gis', 'run', `transcript-${kind}.unresolved`);
-}
-
-function handoff(
-  worktree: Pick<BeadWorktree, 'path' | 'runPath'>,
-  transcriptPath: string,
-): BeadHandoffLocations {
-  return {
-    worktreePath: worktree.path,
-    roundLogPath: worktree.runPath,
-    transcriptPath,
-  };
-}
-
 function summaryText(
   merged: number,
   blocked: number,
@@ -218,91 +178,14 @@ function summaryText(
   return `${merged}件マージ / ${blocked}件 blocked / ${humanWaiting}件が人間の確認待ち`;
 }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolvePromise) =>
     setTimeout(resolvePromise, milliseconds),
   );
 }
 
-async function waitForCurrentResult(
-  path: string,
-  runId: string | undefined,
-  timeout: string,
-): Promise<ResultFileState> {
-  const deadline = Date.now() + parseDurationMs(timeout, 'blocked_timeout');
-  while (true) {
-    const result = await readWorkerResult(path, runId);
-    if (result.kind !== 'missing' && result.kind !== 'stale') {
-      return result;
-    }
-    const remaining = deadline - Date.now();
-    if (remaining <= 0) {
-      return result;
-    }
-    await delay(Math.min(250, remaining));
-  }
-}
-
-function agentSession(
-  agent: AgentInfo | undefined,
-): AgentSessionInfo | undefined {
-  return agent?.agent_session ?? undefined;
-}
-
-async function findWorkerSession(
-  started: StartedWorker,
-  agentName: string,
-  herdr: RunHerdrSource,
-): Promise<AgentSessionInfo | undefined> {
-  const direct =
-    agentSession(started.prompted?.agent) ??
-    agentSession(started.started?.agent);
-  if (herdr.apiSnapshot === undefined) {
-    return direct;
-  }
-
-  try {
-    const paneId =
-      started.prompted?.agent?.pane_id ?? started.started?.agent?.pane_id;
-    const agents = (await herdr.apiSnapshot()).snapshot.agents;
-    const exactPane =
-      paneId === undefined
-        ? undefined
-        : agents.find((agent) => agent.pane_id === paneId);
-    if (exactPane !== undefined) {
-      return agentSession(exactPane);
-    }
-    const named = agents.find((agent) => agent.name === agentName);
-    return agentSession(named);
-  } catch {
-    // A captured start/prompt response is only a fallback when live state
-    // cannot be read. A successful snapshot without a session is authoritative.
-    return direct;
-  }
-}
-
-async function resolveWorkerTranscriptPath(
-  started: StartedWorker,
-  agentName: string,
-  kind: string,
-  worktreePath: string,
-  herdr: RunHerdrSource,
-  resolveTranscript: NonNullable<RunOptions['resolveTranscript']>,
-): Promise<string> {
-  const fallback = defaultTranscriptPath(kind, worktreePath);
-  try {
-    const session = await findWorkerSession(started, agentName, herdr);
-    if (session === undefined) {
-      return fallback;
-    }
-    return (await resolveTranscript(session, worktreePath)) ?? fallback;
-  } catch {
-    return fallback;
-  }
+function assertNever(value: never): never {
+  throw new Error(`unhandled job outcome: ${JSON.stringify(value)}`);
 }
 
 export function formatRunSummary(summary: Omit<RunSummary, 'text'>): string {
@@ -405,259 +288,23 @@ export async function runForegroundLoop(
     for (const bead of unnotified) notifiedHumanIds.add(bead.id);
   };
 
-  const processBead = async (bead: Bead): Promise<JobOutcome> => {
-    const agentName = herdrAgentName(bead.id);
-    let worktree: BeadWorktree;
-    try {
-      worktree = await worktrees.create({ bead, config, cwd, herdr });
-    } catch (error: unknown) {
-      report(
-        `gis: worktree creation failed for ${bead.id}: ${errorMessage(error)}`,
-      );
-      // There is no worktree to retain when creation itself fails. Still
-      // persist a deterministic intended handoff so the bead cannot vanish
-      // from the run with an in-progress status.
-      const intendedPath = resolve(cwd, '.worktrees', bead.id);
-      await beads.markBlocked(
-        bead.id,
-        handoff(
-          { path: intendedPath, runPath: join(intendedPath, '.gis', 'run') },
-          defaultTranscriptPath('unknown', intendedPath),
-        ),
-      );
-      return { status: 'blocked' };
-    }
-
-    let started: StartedWorker | undefined;
-    let workerKind: string | undefined;
-    let implementationCandidate: ProfileCandidate | undefined;
-    try {
-      const selection = await startWithProfileFallback(
-        bead,
-        config,
-        async (candidate) => {
-          workerKind = candidate.kind;
-          await beads.dispatch(bead.id, candidate.kind);
-          return workers.start({
-            bead,
-            agentName,
-            runPath: worktree.runPath,
-            verifyCommand: config.verify,
-            paneId: worktree.paneId,
-            candidate,
-            config,
-            herdr: undefined,
-          });
-        },
-        {
-          shouldFallback: (error) =>
-            error instanceof WorkerStartupError && error.phase === 'start',
-        },
-      );
-      started = selection.result;
-      workerKind = selection.candidate.kind;
-      implementationCandidate = selection.candidate;
-    } catch (error: unknown) {
-      const phase =
-        error instanceof WorkerStartupError ? error.phase : 'startup';
-      report(
-        `gis: worker ${phase} failed for ${bead.id}: ${errorMessage(error)}`,
-      );
-      const transcriptPath = defaultTranscriptPath(
-        workerKind ?? 'unknown',
-        worktree.path,
-      );
-      await beads.markBlocked(bead.id, handoff(worktree, transcriptPath));
-      return { status: 'blocked' };
-    }
-
-    const currentTranscriptPath = (): Promise<string> =>
-      resolveWorkerTranscriptPath(
-        started,
-        agentName,
-        workerKind!,
-        worktree.path,
-        herdr,
-        resolveTranscript,
-      );
-    const currentHandoff = async (): Promise<BeadHandoffLocations> =>
-      handoff(worktree, await currentTranscriptPath());
-    const waitOptions = {
-      beadId: bead.id,
-      target: agentName,
-      worktreePath: worktree.path,
-      roundLogPath: worktree.runPath,
-      transcriptPath: defaultTranscriptPath(workerKind!, worktree.path),
-      resolveTranscriptPath: currentTranscriptPath,
-      blockedTimeout: config.blocked_timeout,
-      workerTimeout: config.worker_timeout,
-      herdr,
-      beads,
-    };
-
-    let waitResult: AgentWaitHandlingResult;
-    try {
-      waitResult = await blocked.wait(waitOptions);
-    } catch (error: unknown) {
-      report(`gis: worker wait failed for ${bead.id}: ${errorMessage(error)}`);
-      await beads.markBlocked(bead.id, await currentHandoff());
-      return { status: 'blocked' };
-    }
-    if (waitResult.status === 'blocked') {
-      return { status: 'blocked' };
-    }
-
-    let result: ResultFileState;
-    try {
-      result = await waitForCurrentResult(
-        started.prompt.resultPath,
-        started.prompt.runId,
-        config.blocked_timeout,
-      );
-    } catch (error: unknown) {
-      report(
-        `gis: worker result read failed for ${bead.id}: ${errorMessage(error)}`,
-      );
-      await beads.markBlocked(bead.id, await currentHandoff());
-      return { status: 'blocked' };
-    }
-
-    if (result.kind === 'needs_human') {
-      const locations = await currentHandoff();
-      await beads.markBlocked(bead.id, locations);
-      try {
-        const gate = await beads.createHumanGate({
-          issueId: bead.id,
-          reason: result.reason,
-          locations,
-        });
-        humanFromWorkers.set(gate.id, gate);
-        notifyHumanBeads(new Map([[gate.id, gate]]), locations.worktreePath);
-        return { status: 'human' };
-      } catch {
-        return { status: 'blocked' };
-      }
-    }
-    if (result.kind !== 'success') {
-      const detail = workerResultProblemDetail(result);
-      report(`gis: worker result ${result.kind} for ${bead.id}: ${detail}`);
-      await beads.markBlocked(bead.id, await currentHandoff());
-      return { status: 'blocked' };
-    }
-
-    const verifyImplementation = async (
-      verificationCycle: VerificationCycle = { kind: 'initial' },
-    ): Promise<'verified' | 'blocked'> => {
-      const verification = await verify.verify({
-        bead,
-        worktreePath: worktree.path,
-        runPath: worktree.runPath,
-        transcriptPath: await currentTranscriptPath(),
-        resolveTranscriptPath: currentTranscriptPath,
-        config,
-        beads,
-        target: agentName,
-        herdr,
-        waitForWorker: async () => {
-          const retry = await blocked.wait(waitOptions);
-          if (retry.status === 'blocked') {
-            throw new AlreadyBlockedError(retry.bead ?? bead);
-          }
-        },
-        verificationCycle,
-      });
-      return verification.status;
-    };
-
-    try {
-      if ((await verifyImplementation({ kind: 'initial' })) === 'blocked') {
-        return { status: 'blocked' };
-      }
-
-      if (config.review) {
-        const reviewerTranscriptPath = (
-          reviewer: StartedReviewer,
-        ): Promise<string> =>
-          resolveWorkerTranscriptPath(
-            reviewer.selection.result,
-            reviewer.agentName,
-            reviewer.selection.candidate.kind,
-            worktree.path,
-            herdr,
-            resolveTranscript,
-          );
-        const reviewOutcome = await runReviewLoop({
-          bead,
-          worktree,
-          config,
-          implementation: {
-            agentName,
-            kind: workerKind!,
-            candidate: implementationCandidate,
-          },
-          herdr: herdr as ReviewHerdrSource,
-          beads,
-          blocked,
-          implementationWaitOptions: waitOptions,
-          implementationHandoff: currentHandoff,
-          reviewerTranscriptPath,
-          verifyImplementation,
-          onHumanGate: (gate, locations) => {
-            humanFromWorkers.set(gate.id, gate);
-            notifyHumanBeads(
-              new Map([[gate.id, gate]]),
-              locations.worktreePath,
-            );
-          },
-          report,
-        });
-        if (reviewOutcome !== 'approved') {
-          return { status: reviewOutcome };
-        }
-      }
-
-      const finalTranscriptPath = await currentTranscriptPath();
-      const mergeResult = await merge.enqueue({
-        bead,
-        worktree,
-        transcriptPath: finalTranscriptPath,
-      });
-      if (mergeResult.status === 'merged') {
-        if (mergeResult.stateError !== undefined) {
-          report(
-            `gis: main contains ${bead.id}, but closing the Beads issue failed; ` +
-              'the worktree was retained for manual reconciliation',
-          );
-        }
-        if (mergeResult.cleanupError !== undefined) {
-          report(
-            `gis: cleanup failed for ${bead.id}; main and bd are merged, ` +
-              'but the worktree was retained for manual recovery',
-          );
-        }
-        return { status: 'merged' };
-      }
-      return { status: 'blocked' };
-    } catch (error: unknown) {
-      if (error instanceof AlreadyBlockedError) {
-        return { status: 'blocked' };
-      }
-      await beads.markBlocked(bead.id, await currentHandoff());
-      return { status: 'blocked' };
-    }
-  };
-
-  const processBeadSafely = async (bead: Bead): Promise<JobOutcome> => {
-    try {
-      return await processBead(bead);
-    } catch (error: unknown) {
-      report(
-        `gis: job ${bead.id} failed while recording recovery state: ` +
-          (error instanceof Error ? error.message : String(error)),
-      );
-      return { status: 'blocked' };
-    }
-  };
+  const processBead = createBeadJobProcessor({
+    cwd,
+    config,
+    beads,
+    herdr,
+    worktrees,
+    workers,
+    blocked,
+    verify,
+    merge,
+    resolveTranscript,
+    report,
+    onHumanGate: (gate, locations) => {
+      humanFromWorkers.set(gate.id, gate);
+      notifyHumanBeads(new Map([[gate.id, gate]]), locations.worktreePath);
+    },
+  });
 
   while (true) {
     const ready = dispatchableReady(await beads.ready());
@@ -668,8 +315,7 @@ export async function runForegroundLoop(
       if (active.has(bead.id)) {
         continue;
       }
-      const job = processBeadSafely(bead);
-      active.set(bead.id, job);
+      active.set(bead.id, processBead(bead));
     }
 
     if (active.size === 0) {
@@ -694,10 +340,17 @@ export async function runForegroundLoop(
       })),
     );
     active.delete(completed.id);
-    if (completed.outcome.status === 'merged') {
-      merged += 1;
-    } else if (completed.outcome.status === 'blocked') {
-      blockedCount += 1;
+    switch (completed.outcome.status) {
+      case 'merged':
+        merged += 1;
+        break;
+      case 'blocked':
+        blockedCount += 1;
+        break;
+      case 'human':
+        break;
+      default:
+        assertNever(completed.outcome);
     }
   }
 
