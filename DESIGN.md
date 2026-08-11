@@ -449,7 +449,30 @@ ready があるうちは走り続けるので、依存グラフは自動的に�
 
 ---
 
-## 11. 設定
+## 11. 初期化と設定
+
+新しいプロジェクトでは、リポジトリのルートで `gis init` を実行する。
+対話ウィザードは既定値を角括弧で表示し、基本的には Enter を押し続ければ
+安全な初期設定が完成する。
+
+```bash
+gis init                 # 対話形式
+gis init --defaults      # 非対話で既定値を採用（CI・scaffold向け）
+```
+
+ウィザードは Git と Beads の初期化要否、base ブランチ、検証コマンド、
+並列タスク数、利用するエージェント、Beads の issue prefix を確認する。
+既存の Git/Beads は再初期化せず、既存の `.gis/config.toml` は Enter だけでは
+上書きしない。生成・更新対象は次の通り。
+
+- `.gis/config.toml`: 完全な既定設定を明示して生成する
+- `.gitignore`: `.gis/run/` が無ければ追記する
+- Git 未初期化時: 選択した base ブランチ名で `git init` する
+- Beads 未初期化時: 非対話モードで `bd init` する
+
+gis 自身は既存のプロジェクトファイルを stage・commit しない。`bd init` は
+Beads連携ファイルだけのセットアップコミットを作る場合があるが、
+`.gis/config.toml` などGISが生成・更新した差分は、人間が範囲を確認してコミットする。
 
 `.gis/config.toml`（リポジトリにコミットする）:
 
