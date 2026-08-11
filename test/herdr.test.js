@@ -5,7 +5,11 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { HerdrAdapter, HerdrApiError } from "../dist/herdr.js";
+import {
+  HerdrAdapter,
+  HerdrApiError,
+  HerdrConnectionError,
+} from "../dist/herdr.js";
 
 async function withHerdrSocket(handler, callback) {
   const directory = await mkdtemp(join(tmpdir(), "gis-herdr-"));
@@ -183,6 +187,19 @@ test("surfaces herdr API errors with their machine-readable code", async () => {
       (error) => error instanceof HerdrApiError &&
         error.code === "not_git_worktree" &&
         error.message.includes("not a git worktree"),
+    );
+  });
+});
+
+test("destroys an unresponsive per-request socket at its deadline", async () => {
+  await withHerdrSocket(async () => {
+    // Deliberately leave the request unanswered. The client must close it.
+  }, async (socketPath) => {
+    const herdr = new HerdrAdapter({ socketPath });
+    await assert.rejects(
+      herdr.apiSnapshot(10),
+      (error) => error instanceof HerdrConnectionError &&
+        error.message.includes("timed out after 10ms"),
     );
   });
 });

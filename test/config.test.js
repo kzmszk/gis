@@ -76,6 +76,7 @@ test("rejects malformed TOML and invalid settings", () => {
     "review = \"true\"",
     "blocked_timeout = \"soon\"",
     "worker_timeout = \"soon\"",
+    "worker_timeout = \"3000ms\"",
     "verify_timeout = \"soon\"",
     "unknown_setting = true",
     "[[profiles.implement]]\nkind = \"codex\"\nmodel = 42\neffort = \"high\"",

@@ -51,7 +51,9 @@ herdr worktree remove
 
 `worktree.create`にはorchestratorのrepository cwdと絶対checkout pathを必ず渡し、
 Herdr UIで現在focusされているworkspaceへ依存しない。`agent.start`は最大30秒、
-runnerがinteractive-readyになるまで待ってから最初のpromptを送る。各API失敗時は
+その応答後も`session.snapshot`で対象paneに同名runnerが登録され、
+runner kindと起動前より新しいstate changeを持ち、`interactive_ready=true`になるまで
+同じ起動時間枠内で待ってから最初のpromptを送る。各API失敗時は
 worktree/start/promptのフェーズとHerdrのエラー内容を表示してからblockedへ移す。
 
 herdr は claude / codex / pi を一級市民として認識し、`working / blocked / done` の状態検知を提供する。

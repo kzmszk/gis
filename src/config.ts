@@ -160,6 +160,14 @@ function asTimeout(value: unknown, path: string): string {
   return timeout;
 }
 
+function asWorkerTimeout(value: unknown): string {
+  const timeout = asTimeout(value, "worker_timeout");
+  if (parseDurationMs(timeout, "worker_timeout") <= 3_000) {
+    throw new ConfigError("worker_timeout must be greater than 3000ms for herdr agent.start");
+  }
+  return timeout;
+}
+
 const DURATION_MULTIPLIERS: Readonly<Record<string, number>> = {
   ms: 1,
   s: 1_000,
@@ -268,7 +276,7 @@ export function parseConfig(contents: string): GisConfig {
       : asBlockedTimeout(source.blocked_timeout),
     worker_timeout: source.worker_timeout === undefined
       ? DEFAULT_CONFIG.worker_timeout
-      : asTimeout(source.worker_timeout, "worker_timeout"),
+      : asWorkerTimeout(source.worker_timeout),
     verify_timeout: source.verify_timeout === undefined
       ? DEFAULT_CONFIG.verify_timeout
       : asTimeout(source.verify_timeout, "verify_timeout"),

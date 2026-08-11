@@ -7,7 +7,6 @@ import { createHerdrAdapter } from "./herdr.js";
 import type {
   AgentInfo,
   AgentSessionInfo,
-  SessionSnapshotResult,
 } from "./herdr.js";
 import {
   SerialMergeQueue,
@@ -53,9 +52,7 @@ export interface RunBeadsSource {
 export type RunHerdrSource = WorktreeLifecycleSource &
   WorkerStartupSource &
   WorkerPromptSource &
-  BlockedHerdrSource & {
-    apiSnapshot?(): Promise<SessionSnapshotResult>;
-  };
+  BlockedHerdrSource;
 
 export interface RunWorktreeSource {
   create(options: CreateBeadWorktreeOptions): Promise<BeadWorktree>;

@@ -113,10 +113,14 @@ export interface WorktreeRemovedResult {
 }
 
 export interface AgentInfo {
+  agent?: string | null;
   pane_id: string;
   workspace_id: string;
   tab_id: string;
+  name?: string | null;
   agent_status: AgentStatus;
+  interactive_ready?: boolean;
+  state_change_seq?: number;
   agent_session?: AgentSessionInfo | null;
   [key: string]: unknown;
 }
@@ -258,14 +262,18 @@ export class HerdrClient {
     this.requestIdPrefix = normalized.requestIdPrefix ?? "gis";
   }
 
-  async request<T>(method: string, params: Record<string, unknown>): Promise<T> {
+  async request<T>(
+    method: string,
+    params: Record<string, unknown>,
+    exchangeTimeoutMs?: number,
+  ): Promise<T> {
     if (method.length === 0) {
       throw new TypeError("herdr API method must not be empty");
     }
 
     const id = `${this.requestIdPrefix}:${this.nextRequestId++}`;
     const request = `${JSON.stringify({ id, method, params })}\n`;
-    const response = await this.exchange(request);
+    const response = await this.exchange(request, exchangeTimeoutMs);
 
     if (response.id !== id) {
       throw new HerdrProtocolError(`response id ${String(response.id)} does not match request ${id}`);
@@ -331,7 +339,7 @@ export class HerdrClient {
     };
     addIfDefined(params, "args", options.args === undefined ? undefined : [...options.args]);
     addIfDefined(params, "timeout_ms", options.timeoutMs);
-    return this.request<AgentStartedResult>("agent.start", params);
+    return this.request<AgentStartedResult>("agent.start", params, options.timeoutMs);
   }
 
   agentPrompt(
@@ -369,15 +377,15 @@ export class HerdrClient {
     return this.request<AgentReadResult>("agent.read", params);
   }
 
-  apiSnapshot(): Promise<SessionSnapshotResult> {
-    return this.request<SessionSnapshotResult>("session.snapshot", {});
+  apiSnapshot(timeoutMs?: number): Promise<SessionSnapshotResult> {
+    return this.request<SessionSnapshotResult>("session.snapshot", {}, timeoutMs);
   }
 
   snapshot(): Promise<SessionSnapshotResult> {
     return this.apiSnapshot();
   }
 
-  private exchange(request: string): Promise<HerdrResponse> {
+  private exchange(request: string, requestTimeoutMs?: number): Promise<HerdrResponse> {
     return new Promise((resolve, reject) => {
       let settled = false;
       let buffer = "";
@@ -401,9 +409,10 @@ export class HerdrClient {
         return;
       }
 
-      if (this.timeoutMs !== undefined) {
-        socket.setTimeout(this.timeoutMs, () => {
-          fail(new HerdrConnectionError(`timed out after ${this.timeoutMs}ms`));
+      const timeoutMs = requestTimeoutMs ?? this.timeoutMs;
+      if (timeoutMs !== undefined) {
+        socket.setTimeout(timeoutMs, () => {
+          fail(new HerdrConnectionError(`timed out after ${timeoutMs}ms`));
         });
       }
 

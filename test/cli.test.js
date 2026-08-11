@@ -100,6 +100,7 @@ test("gis run connects default bd, herdr, and git adapters through merge cleanup
   const worktreePath = join(root, "worktrees", bead.id);
   const baseCwd = await realpath(root);
   const herdrEvents = [];
+  let agentStarted = false;
   let agentSessionReported = false;
   await mkdir(join(root, ".gis"), { recursive: true });
   await writeFile(statePath, JSON.stringify({ status: "open" }), "utf8");
@@ -123,17 +124,21 @@ test("gis run connects default bd, herdr, and git adapters through merge cleanup
       herdrEvents.push(request.method);
       let result;
       if (request.method === "session.snapshot") {
-        result = snapshot(agentSessionReported ? [{
+        result = snapshot(agentStarted ? [{
+          agent: "codex",
+          name: bead.id,
           pane_id: `pane-${bead.id}`,
           workspace_id: `ws-${bead.id}`,
           tab_id: `tab-${bead.id}`,
-          agent_status: "done",
-          agent_session: {
+          agent_status: agentSessionReported ? "done" : "working",
+          interactive_ready: true,
+          state_change_seq: 2,
+          agent_session: agentSessionReported ? {
             source: "integration-test",
             agent: "codex",
             kind: "path",
             value: join(worktreePath, ".gis", "run", "worker.jsonl"),
-          },
+          } : undefined,
         }] : []);
       } else if (request.method === "worktree.create") {
         await mkdir(join(root, "worktrees", bead.id, ".gis", "run"), { recursive: true });
@@ -150,6 +155,7 @@ test("gis run connects default bd, herdr, and git adapters through merge cleanup
           worktree: { path: worktreePath, label: bead.id },
         };
       } else if (request.method === "agent.start") {
+        agentStarted = true;
         result = {
           type: "agent_started",
           agent: {
@@ -229,7 +235,9 @@ test("gis run connects default bd, herdr, and git adapters through merge cleanup
     assert.deepEqual(herdrEvents, [
       "session.snapshot",
       "worktree.create",
+      "session.snapshot",
       "agent.start",
+      "session.snapshot",
       "agent.prompt",
       "agent.wait",
       "session.snapshot",

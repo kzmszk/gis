@@ -7,6 +7,7 @@ import {
   type AgentStartedResult,
   type HerdrClient,
   type AgentStartOptions,
+  type SessionSnapshotResult,
 } from "./herdr.js";
 import { parseDurationMs, type GisConfig, type ProfileCandidate } from "./config.js";
 import { buildAgentStartArgs } from "./profiles.js";
@@ -14,6 +15,8 @@ import { buildAgentStartArgs } from "./profiles.js";
 /** The only text that gis injects into a worker's interactive TUI. */
 export const WORKER_PROMPT = "Read .gis/run/prompt.md and execute it.";
 const MAX_AGENT_START_TIMEOUT_MS = 30_000;
+const MIN_AGENT_START_TIMEOUT_MS = 3_000;
+const AGENT_READY_POLL_MS = 50;
 
 export interface WorkerPromptOptions {
   readonly bead: Pick<Bead, "id" | "description" | "acceptance_criteria">;
@@ -34,6 +37,7 @@ export interface WorkerPrompt {
 
 export interface WorkerStartupSource {
   agentStart(options: AgentStartOptions): Promise<AgentStartedResult>;
+  apiSnapshot(timeoutMs?: number): Promise<SessionSnapshotResult>;
   agentPrompt(target: string, text: string): Promise<AgentPromptedResult>;
 }
 
@@ -64,7 +68,7 @@ export interface StartedWorker {
   readonly prompted: AgentPromptedResult;
 }
 
-export type WorkerStartupPhase = "start" | "prompt";
+export type WorkerStartupPhase = "start" | "readiness" | "prompt";
 
 /** Distinguish a runner process failure from a prompt/API failure. */
 export class WorkerStartupError extends Error {
@@ -171,6 +175,72 @@ function defaultHerdr(): WorkerStartupSource {
   return createHerdrAdapter() as HerdrClient;
 }
 
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function remainingTime(deadline: number): number {
+  return Math.max(0, deadline - Date.now());
+}
+
+async function beforeDeadline<T>(
+  operation: Promise<T>,
+  deadline: number,
+  description: string,
+): Promise<T> {
+  const timeoutMs = remainingTime(deadline);
+  if (timeoutMs === 0) {
+    throw new Error(`${description} timed out`);
+  }
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`${description} timed out`)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+  }
+}
+
+async function waitForNamedAgentReady(
+  herdr: WorkerStartupSource,
+  paneId: string,
+  name: string,
+  kind: string,
+  previousStateChangeSeq: number,
+  deadline: number,
+): Promise<void> {
+  while (true) {
+    const { snapshot } = await beforeDeadline(
+      herdr.apiSnapshot(remainingTime(deadline)),
+      deadline,
+      `waiting for agent ${name} readiness snapshot`,
+    );
+    const agent = snapshot.agents.find((candidate) => candidate.pane_id === paneId);
+    if (agent?.name === name &&
+        agent.agent === kind &&
+        agent.interactive_ready === true &&
+        typeof agent.state_change_seq === "number" &&
+        agent.state_change_seq > previousStateChangeSeq) {
+      return;
+    }
+
+    const remainingMs = remainingTime(deadline);
+    if (remainingMs <= 0) {
+      throw new Error(
+        `agent ${name} in pane ${paneId} did not become interactive-ready before startup timeout`,
+      );
+    }
+    await delay(Math.min(AGENT_READY_POLL_MS, remainingMs));
+  }
+}
+
 /** Write a retry prompt and send the same one-line instruction to the live pane. */
 export async function promptWorker(options: PromptWorkerOptions): Promise<PromptedWorker> {
   requireNonEmpty(options.target, "target");
@@ -187,20 +257,56 @@ export async function startWorker(options: StartWorkerOptions): Promise<StartedW
 
   const prompt = await writeWorkerPrompt(options);
   const herdr = options.herdr ?? defaultHerdr();
+  const configuredTimeoutMs = parseDurationMs(options.config.worker_timeout, "worker_timeout");
+  if (configuredTimeoutMs <= MIN_AGENT_START_TIMEOUT_MS) {
+    throw new RangeError("worker_timeout must be greater than 3000ms for herdr agent.start");
+  }
+  const startTimeoutMs = Math.min(configuredTimeoutMs, MAX_AGENT_START_TIMEOUT_MS);
+  const deadline = Date.now() + startTimeoutMs;
   let started: AgentStartedResult;
+  let previousStateChangeSeq: number;
   try {
-    started = await herdr.agentStart({
-      name: options.bead.id,
-      kind: options.candidate.kind,
-      paneId: options.paneId,
-      args: buildAgentStartArgs(options.candidate, options.config),
-      timeoutMs: Math.min(
-        parseDurationMs(options.config.worker_timeout, "worker_timeout"),
-        MAX_AGENT_START_TIMEOUT_MS,
-      ),
-    });
+    const beforeStart = await beforeDeadline(
+      herdr.apiSnapshot(remainingTime(deadline)),
+      deadline,
+      `capturing agent ${options.bead.id} pre-start snapshot`,
+    );
+    const previousAgent = beforeStart.snapshot.agents.find(
+      (agent) => agent.pane_id === options.paneId,
+    );
+    previousStateChangeSeq = typeof previousAgent?.state_change_seq === "number"
+      ? previousAgent.state_change_seq
+      : -1;
+    const agentStartTimeoutMs = remainingTime(deadline);
+    if (agentStartTimeoutMs <= MIN_AGENT_START_TIMEOUT_MS) {
+      throw new Error("not enough startup time remains for herdr agent.start");
+    }
+    started = await beforeDeadline(
+      herdr.agentStart({
+        name: options.bead.id,
+        kind: options.candidate.kind,
+        paneId: options.paneId,
+        args: buildAgentStartArgs(options.candidate, options.config),
+        timeoutMs: agentStartTimeoutMs,
+      }),
+      deadline,
+      `starting agent ${options.bead.id}`,
+    );
   } catch (error: unknown) {
     throw new WorkerStartupError("start", error);
+  }
+
+  try {
+    await waitForNamedAgentReady(
+      herdr,
+      options.paneId,
+      options.bead.id,
+      options.candidate.kind,
+      previousStateChangeSeq,
+      deadline,
+    );
+  } catch (error: unknown) {
+    throw new WorkerStartupError("readiness", error);
   }
 
   let prompted: AgentPromptedResult;

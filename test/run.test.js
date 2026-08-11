@@ -201,15 +201,24 @@ test("blocks a bead when worktree creation fails without rejecting the run", asy
     /worktree creation failed for gis-vst\.worktree-failure: worktree create failed/);
 });
 
-test("reports the worker phase and cause when prompting fails", async () => {
+test("reports readiness failure without falling back after a worker was started", async () => {
   const resultRoot = await mkdtemp(join(tmpdir(), "gis-run-prompt-failure-"));
   const source = bead("gis-vst.prompt-failure");
   const reports = [];
+  const attempts = [];
   let ready = true;
 
   try {
     const result = await runForegroundLoop({
-      config: config({ concurrency: 1 }),
+      config: config({
+        concurrency: 1,
+        kinds: ["codex", "claude"],
+        profiles: {
+          plan: [{ kind: "codex" }],
+          implement: [{ kind: "codex" }, { kind: "claude" }],
+          review: [{ kind: "codex" }],
+        },
+      }),
       beads: {
         async ready() {
           if (!ready) return [];
@@ -228,16 +237,18 @@ test("reports the worker phase and cause when prompting fails", async () => {
       },
       worktrees: dependencies(resultRoot).worktrees,
       workers: {
-        async start() {
-          throw new WorkerStartupError("prompt", new Error("agent not interactive-ready"));
+        async start({ candidate }) {
+          attempts.push(candidate.kind);
+          throw new WorkerStartupError("readiness", new Error("agent not interactive-ready"));
         },
       },
       report: (message) => reports.push(message),
     });
 
     assert.equal(result.blocked, 1);
+    assert.deepEqual(attempts, ["codex"]);
     assert.match(reports.join("\n"),
-      /worker prompt failed for gis-vst\.prompt-failure:.*agent not interactive-ready/);
+      /worker readiness failed for gis-vst\.prompt-failure:.*agent not interactive-ready/);
   } finally {
     await rm(resultRoot, { recursive: true, force: true });
   }
