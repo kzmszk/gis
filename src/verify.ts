@@ -11,6 +11,7 @@ import {
 
 const execAsync = promisify(exec);
 const VERIFY_MAX_BUFFER = 10 * 1024 * 1024;
+const SLOP_REPORT_PREFIX = 'GIS_SLOP_REPORT=';
 
 export interface VerifyCommandResult {
   readonly passed: boolean;
@@ -18,6 +19,18 @@ export interface VerifyCommandResult {
   readonly stderr?: string;
   readonly exitCode?: number;
   readonly signal?: string;
+}
+
+interface SlopMetricScore {
+  readonly verbosity: number;
+  readonly erosion: number;
+}
+
+interface SlopReport {
+  readonly base: SlopMetricScore;
+  readonly current: SlopMetricScore;
+  readonly verbosityDelta: number;
+  readonly erosionDelta: number;
 }
 
 export type VerifyCommandRunner = (
@@ -87,6 +100,43 @@ function text(value: unknown): string {
     : value instanceof Buffer
       ? value.toString('utf8')
       : '';
+}
+
+function isSlopReport(value: unknown): value is SlopReport {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    return false;
+  }
+  const report = value as Record<string, unknown>;
+  const base = report.base as Record<string, unknown> | undefined;
+  const current = report.current as Record<string, unknown> | undefined;
+  return (
+    typeof base?.verbosity === 'number' &&
+    typeof base.erosion === 'number' &&
+    typeof current?.verbosity === 'number' &&
+    typeof current.erosion === 'number' &&
+    typeof report.verbosityDelta === 'number' &&
+    typeof report.erosionDelta === 'number'
+  );
+}
+
+/** Extract the optional report emitted by `gis slop --report` from verify output. */
+export function slopFeedback(result: VerifyCommandResult): string | undefined {
+  const line = result.stdout
+    ?.split(/\r?\n/)
+    .find((value) => value.startsWith(SLOP_REPORT_PREFIX));
+  if (line === undefined) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(line.slice(SLOP_REPORT_PREFIX.length));
+    if (!isSlopReport(parsed)) return undefined;
+    const points = (value: number) => `${(value * 100).toFixed(2)}pt`;
+    return [
+      'SCBench-inspired quality report (informational; does not block this task):',
+      `- verbosity: ${(parsed.current.verbosity * 100).toFixed(2)}% (${points(parsed.verbosityDelta)})`,
+      `- structural erosion: ${(parsed.current.erosion * 100).toFixed(2)}% (${points(parsed.erosionDelta)})`,
+    ].join('\n');
+  } catch {
+    return undefined;
+  }
 }
 
 function exitCode(

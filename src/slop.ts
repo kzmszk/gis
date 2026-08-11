@@ -27,6 +27,8 @@ export interface SlopComparison {
   readonly erosionDelta: number;
 }
 
+export const SLOP_REPORT_PREFIX = 'GIS_SLOP_REPORT=';
+
 function sourceLines(source: string): string[] {
   let inBlockComment = false;
   return source.split(/\r?\n/).filter((line) => {
@@ -180,6 +182,10 @@ export function compareSlop(
     verbosityDelta: current.verbosity - base.verbosity,
     erosionDelta: current.erosion - base.erosion,
   };
+}
+
+export function serializeSlopReport(comparison: SlopComparison): string {
+  return `${SLOP_REPORT_PREFIX}${JSON.stringify(comparison)}`;
 }
 
 async function walkTypeScript(

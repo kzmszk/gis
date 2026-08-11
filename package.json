@@ -12,7 +12,7 @@
   },
   "scripts": {
     "build": "tsc && chmod +x dist/cli.js",
-    "check": "pnpm run format:check && pnpm run lint && pnpm run typecheck && pnpm test && pnpm run slop:verify",
+    "check": "pnpm run format:check && pnpm run lint && pnpm run typecheck && pnpm test && pnpm run slop:report",
     "format": "oxfmt .",
     "format:check": "oxfmt --check .",
     "lint": "oxlint . --deny-warnings",

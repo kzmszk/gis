@@ -56,6 +56,8 @@ export interface ReviewLoopOptions {
   readonly verifyImplementation: (
     cycle: ReviewVerificationCycle,
   ) => Promise<'verified' | 'blocked'>;
+  /** Informational quality metrics from the most recent successful verification. */
+  readonly getSlopFeedback?: () => string | undefined;
   readonly onHumanGate: (gate: Bead, locations: BeadHandoffLocations) => void;
   readonly report: (message: string) => void;
 }
@@ -285,6 +287,7 @@ export async function runReviewLoop(
       implementationCandidate: options.implementation.candidate,
       config: options.config,
       herdr: options.herdr,
+      reviewFeedback: options.getSlopFeedback?.(),
     });
   } catch (error: unknown) {
     options.report(
@@ -416,7 +419,9 @@ export async function runReviewLoop(
             target: reviewer.agentName,
             round,
             implementationKind: options.implementation.kind,
-            feedback,
+            feedback: [options.getSlopFeedback?.(), feedback]
+              .filter((value): value is string => value !== undefined)
+              .join('\n\n'),
             herdr: options.herdr,
           });
           prompt = prompted.prompt;

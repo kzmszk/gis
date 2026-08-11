@@ -182,7 +182,9 @@ verify は無料（数十秒の CPU）、レビューは有料（サブスク枠
 冗長性は正規化した3行ブロックの重複SLOC率、structural erosion は
 `cyclomatic complexity * sqrt(function SLOC)` のうち複雑度10超の関数が占める割合である。
 どちらも低いほどよい。`gis slop --report` は計測のみ、既定の `gis slop` はいずれかが
-0.02超悪化すると失敗する。プロジェクトの verify へは `pnpm slop:verify` を追加する。
+0.02超悪化すると失敗する。プロジェクトの通常 verify は report-only の `pnpm slop:report` を
+使い、成功時の数値と差分を実装者・レビュアーへ情報として渡す。しきい値を校正後、
+`pnpm slop:verify` に切り替えればゲート化できる。
 
 ### マージ時に rebase してから verify を再実行する
 

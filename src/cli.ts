@@ -7,7 +7,7 @@ import { initializeProject, type InitResult } from './init.js';
 import { reconcileStartup } from './recovery.js';
 import { recoverLateCompletions } from './late-recovery.js';
 import { runForegroundLoop, type RunSummary } from './run.js';
-import { measureWorktreeSlop } from './slop.js';
+import { measureWorktreeSlop, serializeSlopReport } from './slop.js';
 
 export { readConfig } from './config.js';
 
@@ -51,7 +51,7 @@ export async function main(
       throw new Error('slop max delta must be a non-negative number');
     }
     const comparison = await measureWorktreeSlop(process.cwd(), base);
-    console.log(JSON.stringify(comparison, null, 2));
+    console.log(serializeSlopReport(comparison));
     if (
       !reportOnly &&
       (comparison.verbosityDelta > maxDelta ||
