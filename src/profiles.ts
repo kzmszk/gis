@@ -191,7 +191,7 @@ export async function startWithProfileFallback<T>(
   start: ProfileAgentStarter<T>,
   options: CandidateSelectionOptions = {},
 ): Promise<ProfileStartResult<T>> {
-  const profile = resolveProfileName(bead);
+  const profile = options.profile ?? resolveProfileName(bead);
   const candidates = options.candidateOrder ?? config.profiles[profile];
   let attempts = 0;
   let lastError: unknown;

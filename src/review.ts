@@ -204,7 +204,9 @@ export async function startReviewer(
     {
       profile: 'review',
       candidateOrder: candidates,
-      shouldFallback: (error) => error instanceof WorkerStartupError,
+      shouldFallback: (error) =>
+        error instanceof WorkerStartupError &&
+        (error.phase === 'start' || error.phase === 'readiness'),
     },
   );
   return { paneId, agentName, selection };

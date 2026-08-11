@@ -17,8 +17,11 @@ import {
 } from './config.js';
 import { buildAgentStartArgs } from './profiles.js';
 
-/** The only text that gis injects into a worker's interactive TUI. */
-export const WORKER_PROMPT = 'Read .gis/run/prompt.md and execute it.';
+/** The only text that gis injects into an implementation worker's TUI. */
+export const WORKER_PROMPT =
+  'Read .gis/run/implement-prompt.md and execute it.';
+/** The only text that gis injects into a reviewer worker's TUI. */
+export const REVIEWER_PROMPT = 'Read .gis/run/review-prompt.md and execute it.';
 const MAX_AGENT_START_TIMEOUT_MS = 300_000;
 const MIN_AGENT_START_TIMEOUT_MS = 3_000;
 const AGENT_READY_POLL_MS = 50;
@@ -41,6 +44,12 @@ export interface WorkerPromptOptions {
   readonly implementationKind?: string;
   /** Review findings to address on a subsequent review round. */
   readonly reviewFeedback?: string;
+  /** Phase suffix used to keep implementation result files distinct. */
+  readonly phase?: 'verify' | 'review-fix';
+  /** Namespace used to retain verification attempts across review cycles. */
+  readonly verificationCycle?: VerificationCycle;
+  /** Verification attempt represented by this retry prompt. */
+  readonly verificationAttempt?: number;
 }
 
 export interface WorkerPrompt {
@@ -85,6 +94,15 @@ export interface StartWorkerOptions extends WorkerPromptOptions {
 }
 
 export type WorkerRole = 'implement' | 'review';
+
+export type VerificationCycle =
+  | { readonly kind: 'initial' }
+  | { readonly kind: 'review'; readonly round: number };
+
+export type ReviewVerificationCycle = Extract<
+  VerificationCycle,
+  { readonly kind: 'review' }
+>;
 
 export interface StartedWorker {
   readonly prompt: WorkerPrompt;
@@ -266,6 +284,45 @@ function promptContent(
   ].join('\n');
 }
 
+function resultSuffix(options: WorkerPromptOptions): string {
+  const role: WorkerRole = options.role ?? 'implement';
+  if (role === 'review') {
+    return 'review';
+  }
+  if (options.phase === 'verify') {
+    const cycle = verificationCycleName(options.verificationCycle);
+    const attempt = options.verificationAttempt;
+    if (attempt === undefined) {
+      return `impl-verify-${cycle}`;
+    }
+    if (!Number.isSafeInteger(attempt) || attempt <= 0) {
+      throw new RangeError('verificationAttempt must be a positive integer');
+    }
+    return `impl-verify-${cycle}-attempt-${attempt}`;
+  }
+  if (options.phase === 'review-fix') {
+    return 'impl-review-fix';
+  }
+  return 'impl';
+}
+
+function verificationCycleName(cycle: VerificationCycle | undefined): string {
+  if (cycle === undefined || cycle.kind === 'initial') {
+    return 'initial';
+  }
+  if (!Number.isSafeInteger(cycle.round) || cycle.round <= 0) {
+    throw new RangeError('verification cycle round must be a positive integer');
+  }
+  return `review-${cycle.round}`;
+}
+
+export function workerPromptForRole(role: WorkerRole): string {
+  if (role === 'review') {
+    return REVIEWER_PROMPT;
+  }
+  return WORKER_PROMPT;
+}
+
 /** Write the complete worker instructions to the worktree filesystem. */
 export async function writeWorkerPrompt(
   options: WorkerPromptOptions,
@@ -277,13 +334,12 @@ export async function writeWorkerPrompt(
 
   const round = roundNumber(options.round);
   const role: WorkerRole = options.role ?? 'implement';
-  const resultSuffix = role === 'review' ? 'review' : 'impl';
-  const resultRelativePath = `.gis/run/round-${round}-${resultSuffix}.json`;
-  const path = join(options.runPath, 'prompt.md');
-  const resultPath = join(
-    options.runPath,
-    `round-${round}-${resultSuffix}.json`,
-  );
+  const suffix = resultSuffix(options);
+  const resultRelativePath = `.gis/run/round-${round}-${suffix}.json`;
+  const promptName =
+    role === 'review' ? 'review-prompt.md' : 'implement-prompt.md';
+  const path = join(options.runPath, promptName);
+  const resultPath = join(options.runPath, `round-${round}-${suffix}.json`);
   const runId = randomUUID();
   const content = promptContent(options, resultRelativePath, runId);
 
@@ -412,7 +468,7 @@ export async function promptWorker(
   const herdr = options.herdr ?? defaultHerdr();
   const prompted = await herdr.agentPrompt(
     options.target,
-    WORKER_PROMPT,
+    workerPromptForRole(options.role ?? 'implement'),
     promptAcceptanceOptions(PROMPT_ACCEPT_TIMEOUT_MS),
   );
   return { prompt, prompted };
@@ -509,7 +565,7 @@ export async function startWorker(
     prompted = await beforeDeadline(
       herdr.agentPrompt(
         options.agentName,
-        WORKER_PROMPT,
+        workerPromptForRole(options.role ?? 'implement'),
         promptAcceptanceOptions(promptTimeoutMs),
       ),
       deadline,

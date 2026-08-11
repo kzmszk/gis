@@ -158,7 +158,7 @@ test("runs the worktree and agent lifecycle over herdr's socket API", async () =
       });
       await herdr.agentPrompt(
         'gis-vst.4',
-        'Read .gis/run/prompt.md and execute it.',
+        'Read .gis/run/implement-prompt.md and execute it.',
         { wait: { until: ['working'], timeoutMs: 10_000 } },
       );
       const wait = await herdr.agentWait('gis-vst.4');
@@ -195,7 +195,7 @@ test("runs the worktree and agent lifecycle over herdr's socket API", async () =
       });
       assert.deepEqual(requests[2].params, {
         target: 'gis-vst.4',
-        text: 'Read .gis/run/prompt.md and execute it.',
+        text: 'Read .gis/run/implement-prompt.md and execute it.',
         wait: { until: ['working'], timeout_ms: 10_000 },
       });
       assert.deepEqual(requests[3].params, {

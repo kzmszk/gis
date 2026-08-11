@@ -212,7 +212,7 @@ test('gis run connects default bd, herdr, and git adapters through merge cleanup
       } else if (request.method === 'agent.prompt') {
         agentSessionReported = true;
         const promptContents = await readFile(
-          join(worktreePath, '.gis', 'run', 'prompt.md'),
+          join(worktreePath, '.gis', 'run', 'implement-prompt.md'),
           'utf8',
         );
         const runId = /Run ID: `([^`]+)`/.exec(promptContents)?.[1];

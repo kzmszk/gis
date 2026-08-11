@@ -13,7 +13,13 @@ import {
   type ReviewResultState,
   type StartedReviewer,
 } from './review.js';
-import { promptWorker } from './worker.js';
+import { promptWorker, type ReviewVerificationCycle } from './worker.js';
+import {
+  readWorkerResult,
+  workerResultProblemDetail,
+  type ResultFileState,
+  type WorkerResultProblem,
+} from './result.js';
 import type { BeadWorktree } from './worktree.js';
 
 export type ReviewLoopOutcome = 'approved' | 'blocked' | 'human';
@@ -47,7 +53,9 @@ export interface ReviewLoopOptions {
   readonly reviewerTranscriptPath: (
     reviewer: StartedReviewer,
   ) => Promise<string>;
-  readonly verifyImplementation: () => Promise<'verified' | 'blocked'>;
+  readonly verifyImplementation: (
+    cycle: ReviewVerificationCycle,
+  ) => Promise<'verified' | 'blocked'>;
   readonly onHumanGate: (gate: Bead, locations: BeadHandoffLocations) => void;
   readonly report: (message: string) => void;
 }
@@ -95,6 +103,26 @@ export function requestedChangesFeedback(
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function waitForImplementationResult(
+  path: string,
+  runId: string,
+  timeout: string,
+): Promise<ResultFileState> {
+  const deadline = Date.now() + parseDurationMs(timeout, 'blocked_timeout');
+  while (true) {
+    const result = await readWorkerResult(path, runId);
+    if (result.kind !== 'missing' && result.kind !== 'stale') {
+      return result;
+    }
+
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      return result;
+    }
+    await delay(Math.min(250, remaining));
+  }
 }
 
 async function reviewerHandoff(
@@ -165,6 +193,57 @@ async function blockReviewProblem(
   );
   await block(await reviewerHandoff(reviewer, options), options);
   return 'blocked';
+}
+
+async function blockImplementationProblem(
+  result: WorkerResultProblem,
+  options: ReviewLoopOptions,
+): Promise<'blocked'> {
+  const detail = workerResultProblemDetail(result);
+  options.report(
+    `gis: implementation result ${result.kind} for ${options.bead.id}: ${detail}`,
+  );
+  await block(await options.implementationHandoff(), options);
+  return 'blocked';
+}
+
+async function handleImplementationResult(
+  prompt: { readonly resultPath: string; readonly runId: string },
+  options: ReviewLoopOptions,
+): Promise<'success' | 'human' | 'blocked'> {
+  let result: ResultFileState;
+  try {
+    result = await waitForImplementationResult(
+      prompt.resultPath,
+      prompt.runId,
+      options.config.blocked_timeout,
+    );
+  } catch (error: unknown) {
+    options.report(
+      `gis: implementation result read failed for ${options.bead.id}: ${errorMessage(error)}`,
+    );
+    await block(await options.implementationHandoff(), options);
+    return 'blocked';
+  }
+
+  switch (result.kind) {
+    case 'success':
+      return 'success';
+    case 'needs_human':
+      return requestHuman(
+        result.reason,
+        await options.implementationHandoff(),
+        options,
+      );
+    case 'failure':
+    case 'invalid_schema':
+    case 'invalid_json':
+    case 'stale':
+    case 'missing':
+      return blockImplementationProblem(result, options);
+    default:
+      return assertNever(result);
+  }
 }
 
 async function requestReviewLimitDecision(
@@ -289,22 +368,42 @@ export async function runReviewLoop(
         options.report(
           `gis: reviewer requested changes for ${options.bead.id}; returning to implementation agent ${options.implementation.agentName}`,
         );
-        await promptWorker({
+        const implementationPrompt = await promptWorker({
           bead: options.bead,
           runPath: options.worktree.runPath,
           verifyCommand: options.config.verify,
           round: round + 1,
+          phase: 'review-fix',
           reviewFeedback: feedback,
           target: options.implementation.agentName,
           herdr: options.herdr,
         });
-        const implementationWait = await options.blocked.wait(
-          options.implementationWaitOptions,
-        );
+        let implementationWait: AgentWaitHandlingResult;
+        try {
+          implementationWait = await options.blocked.wait(
+            options.implementationWaitOptions,
+          );
+        } catch (error: unknown) {
+          options.report(
+            `gis: implementation wait failed for ${options.bead.id}: ${errorMessage(error)}`,
+          );
+          await block(await options.implementationHandoff(), options);
+          return 'blocked';
+        }
         if (implementationWait.status === 'blocked') {
           return 'blocked';
         }
-        if ((await options.verifyImplementation()) === 'blocked') {
+        const implementationOutcome = await handleImplementationResult(
+          implementationPrompt.prompt,
+          options,
+        );
+        if (implementationOutcome !== 'success') {
+          return implementationOutcome;
+        }
+        if (
+          (await options.verifyImplementation({ kind: 'review', round })) ===
+          'blocked'
+        ) {
           return 'blocked';
         }
 

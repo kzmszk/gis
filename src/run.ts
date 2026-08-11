@@ -36,6 +36,7 @@ import {
   type StartedWorker,
   type WorkerPromptSource,
   type WorkerStartupSource,
+  type VerificationCycle,
   WorkerStartupError,
 } from './worker.js';
 import type { ReviewHerdrSource, StartedReviewer } from './review.js';
@@ -544,7 +545,9 @@ export async function runForegroundLoop(
       return { status: 'blocked' };
     }
 
-    const verifyImplementation = async (): Promise<'verified' | 'blocked'> => {
+    const verifyImplementation = async (
+      verificationCycle: VerificationCycle = { kind: 'initial' },
+    ): Promise<'verified' | 'blocked'> => {
       const verification = await verify.verify({
         bead,
         worktreePath: worktree.path,
@@ -561,12 +564,13 @@ export async function runForegroundLoop(
             throw new AlreadyBlockedError(retry.bead ?? bead);
           }
         },
+        verificationCycle,
       });
       return verification.status;
     };
 
     try {
-      if ((await verifyImplementation()) === 'blocked') {
+      if ((await verifyImplementation({ kind: 'initial' })) === 'blocked') {
         return { status: 'blocked' };
       }
 

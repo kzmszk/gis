@@ -53,7 +53,7 @@ test('accepts every default and creates a complete usable setup', async () => {
       '--non-interactive',
       '--prefix',
     ]);
-    const config = await loadConfig(root, () => undefined);
+    const config = await loadConfig(root);
     assert.equal(config.base, 'main');
     assert.equal(config.verify, 'pnpm check');
     assert.equal(config.concurrency, 1);
@@ -98,7 +98,7 @@ test('retries invalid customized answers and preserves existing Git and Beads', 
       2,
     );
     assert.match(reports.join('\n'), /正の整数/);
-    const config = await loadConfig(root, () => undefined);
+    const config = await loadConfig(root);
     assert.equal(config.base, 'release');
     assert.equal(config.verify, 'cargo test --all');
     assert.equal(config.concurrency, 4);
@@ -178,7 +178,7 @@ test('serializes a config accepted by the config parser', async () => {
       }),
       'utf8',
     );
-    const config = await loadConfig(root, () => undefined);
+    const config = await loadConfig(root);
     assert.equal(config.base, 'develop');
     assert.equal(config.profiles.review[0].effort, 'max');
   });

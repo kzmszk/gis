@@ -13,6 +13,7 @@ import {
 import {
   requestedChangesFeedback,
   reviewProblemDetail,
+  runReviewLoop,
 } from '../dist/review-loop.js';
 import { runForegroundLoop } from '../dist/run.js';
 
@@ -200,7 +201,7 @@ test('starts review in a split pane and prefers a different kind', async () => {
     assert.equal(calls[0][1].workspaceId, 'workspace-1');
     assert.equal(calls.find((call) => call[0] === 'start')[1].kind, 'claude');
     const prompt = await readFile(
-      join(root, '.gis', 'run', 'prompt.md'),
+      join(root, '.gis', 'run', 'review-prompt.md'),
       'utf8',
     );
     assert.match(prompt, /gis reviewer task/);
@@ -318,6 +319,51 @@ test('falls back after a reviewer readiness failure as well as agent.start failu
   }
 });
 
+test('does not restart another reviewer after a prompt-phase startup failure', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'gis-review-prompt-failure-'));
+  const startedKinds = [];
+  let snapshots = 0;
+  try {
+    await assert.rejects(
+      startReviewer({
+        bead,
+        worktreePath: root,
+        runPath: join(root, '.gis', 'run'),
+        implementationPaneId: 'impl-pane',
+        workspaceId: 'workspace-1',
+        implementationKind: 'codex',
+        implementationCandidate: config().profiles.implement[0],
+        config: config(),
+        herdr: {
+          async paneSplit() {
+            return { type: 'pane_split', pane: { pane_id: 'review-pane' } };
+          },
+          async apiSnapshot() {
+            snapshots += 1;
+            return readySnapshot({ state_change_seq: snapshots });
+          },
+          async agentStart(options) {
+            startedKinds.push(options.kind);
+            return {
+              type: 'agent_started',
+              agent: { pane_id: options.paneId },
+              argv: [],
+            };
+          },
+          async agentPrompt() {
+            throw new WorkerStartupError('prompt', new Error('prompt failed'));
+          },
+        },
+      }),
+      (error) =>
+        error instanceof WorkerStartupError && error.phase === 'prompt',
+    );
+    assert.deepEqual(startedKinds, ['claude']);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('returns implementation fixes to the original pane and re-reviews the same reviewer', async () => {
   const root = await mkdtemp(join(tmpdir(), 'gis-review-loop-'));
   const events = [];
@@ -352,17 +398,21 @@ test('returns implementation fixes to the original pane and re-reviews the same 
     },
   });
   const runPath = join(root, '.gis', 'run');
-  const resultPath = (round, role) =>
-    join(runPath, `round-${round}-${role}.json`);
-
+  const initialResultPath = join(runPath, 'round-1-impl.json');
   const writePromptResult = async (role, verdict) => {
-    const prompt = await readFile(join(runPath, 'prompt.md'), 'utf8');
+    const prompt = await readFile(
+      join(
+        runPath,
+        role === 'review' ? 'review-prompt.md' : 'implement-prompt.md',
+      ),
+      'utf8',
+    );
     const runId = /Run ID: `([^`]+)`/.exec(prompt)?.[1];
-    const round = /round-(\d+)-/.exec(prompt)?.[1];
+    const resultRelative = /write a JSON result to `([^`]+)`/.exec(prompt)?.[1];
     assert.ok(runId);
-    assert.ok(round);
+    assert.ok(resultRelative);
     await writeFile(
-      resultPath(round, role),
+      join(root, resultRelative),
       JSON.stringify({
         run_id: runId,
         status: 'done',
@@ -418,7 +468,7 @@ test('returns implementation fixes to the original pane and re-reviews the same 
         async start() {
           events.push(['implementation-start']);
           await writeFile(
-            resultPath(1, 'impl'),
+            initialResultPath,
             JSON.stringify({
               run_id: 'implementation-run',
               status: 'done',
@@ -427,7 +477,7 @@ test('returns implementation fixes to the original pane and re-reviews the same 
           );
           return {
             prompt: {
-              resultPath: resultPath(1, 'impl'),
+              resultPath: initialResultPath,
               runId: 'implementation-run',
             },
             started: {},
@@ -490,7 +540,7 @@ test('returns implementation fixes to the original pane and re-reviews the same 
             );
           } else {
             implementationPromptBodies.push(
-              await readFile(join(runPath, 'prompt.md'), 'utf8'),
+              await readFile(join(runPath, 'implement-prompt.md'), 'utf8'),
             );
             await writePromptResult('impl', 'approved');
           }
@@ -549,6 +599,188 @@ test('returns implementation fixes to the original pane and re-reviews the same 
     await rm(root, { recursive: true, force: true });
   }
 });
+
+for (const scenario of [
+  {
+    name: 'needs_human',
+    implementationResult: {
+      status: 'done',
+      summary: 'implementation needs a decision',
+      needs_human: 'Choose the migration strategy.',
+    },
+    expectedOutcome: 'human',
+    expectedGates: 1,
+  },
+  {
+    name: 'failure',
+    implementationResult: {
+      status: 'failed',
+      summary: 'implementation failed',
+    },
+    expectedOutcome: 'blocked',
+    expectedGates: 0,
+  },
+  {
+    name: 'missing',
+    implementationResult: undefined,
+    expectedOutcome: 'blocked',
+    expectedGates: 0,
+  },
+]) {
+  test(`handles review-fix implementation ${scenario.name} results`, async () => {
+    const root = await mkdtemp(
+      join(tmpdir(), `gis-review-fix-${scenario.name}-`),
+    );
+    const runPath = join(root, '.gis', 'run');
+    const source = {
+      ...bead,
+      id: `gis-review-fix-${scenario.name}`,
+    };
+    const reviewerName = reviewAgentName(source.id);
+    const blocked = [];
+    const gates = [];
+    let snapshotCalls = 0;
+    try {
+      const writeResult = async (role, result) => {
+        const promptPath = join(
+          runPath,
+          role === 'review' ? 'review-prompt.md' : 'implement-prompt.md',
+        );
+        const prompt = await readFile(promptPath, 'utf8');
+        const runId = /Run ID: `([^`]+)`/.exec(prompt)?.[1];
+        const resultRelative = /write a JSON result to `([^`]+)`/.exec(
+          prompt,
+        )?.[1];
+        assert.ok(runId);
+        assert.ok(resultRelative);
+        if (result === undefined) return;
+        await writeFile(
+          join(root, resultRelative),
+          JSON.stringify({ run_id: runId, ...result }),
+          'utf8',
+        );
+      };
+
+      const outcome = await runReviewLoop({
+        bead: source,
+        worktree: {
+          beadId: source.id,
+          path: root,
+          runPath,
+          workspaceId: 'workspace-1',
+          paneId: 'implementation-pane',
+        },
+        config: config({ review_max: 2, blocked_timeout: '1s' }),
+        implementation: {
+          agentName: 'implementation-agent',
+          kind: 'codex',
+          candidate: config().profiles.implement[0],
+        },
+        herdr: {
+          async paneSplit() {
+            return { type: 'pane_split', pane: { pane_id: 'review-pane' } };
+          },
+          async apiSnapshot() {
+            snapshotCalls += 1;
+            return {
+              type: 'session_snapshot',
+              snapshot: {
+                agents:
+                  snapshotCalls === 1
+                    ? []
+                    : [
+                        {
+                          pane_id: 'review-pane',
+                          name: reviewerName,
+                          agent: 'claude',
+                          agent_status: 'done',
+                          interactive_ready: true,
+                          launch_pending: false,
+                          state_change_seq: snapshotCalls,
+                        },
+                      ],
+              },
+            };
+          },
+          async agentStart(options) {
+            return {
+              type: 'agent_started',
+              agent: { pane_id: options.paneId },
+              argv: [],
+            };
+          },
+          async agentPrompt(target) {
+            if (target === reviewerName) {
+              await writeResult('review', {
+                status: 'done',
+                summary: 'Please fix the reported issue.',
+                verdict: 'changes_requested',
+                feedback: 'Fix the reported issue before review.',
+              });
+            } else {
+              await writeResult('implement', scenario.implementationResult);
+            }
+            return { type: 'agent_prompted', agent: { pane_id: target } };
+          },
+        },
+        beads: {
+          async markBlocked(id, locations) {
+            blocked.push({ id, locations });
+            return { ...source, id, status: 'blocked' };
+          },
+          async createHumanGate(request) {
+            const gate = {
+              ...source,
+              id: `${source.id}-human`,
+              status: 'open',
+            };
+            gates.push({ request, gate });
+            return gate;
+          },
+        },
+        blocked: {
+          async wait() {
+            return {
+              status: 'done',
+              wasBlocked: false,
+              worktreeRetained: false,
+            };
+          },
+        },
+        implementationWaitOptions: {
+          beadId: source.id,
+          target: 'implementation-agent',
+          worktreePath: root,
+          roundLogPath: runPath,
+          transcriptPath: join(root, 'implementation-session.jsonl'),
+          blockedTimeout: '1s',
+          workerTimeout: '1s',
+          herdr: {},
+          beads: {},
+        },
+        implementationHandoff: async () => ({
+          worktreePath: root,
+          roundLogPath: runPath,
+          transcriptPath: join(root, 'implementation-session.jsonl'),
+        }),
+        reviewerTranscriptPath: async () => join(root, 'review-session.jsonl'),
+        verifyImplementation: async () => {
+          throw new Error(
+            'verification must not run after a non-success result',
+          );
+        },
+        onHumanGate: () => undefined,
+        report: () => undefined,
+      });
+
+      assert.equal(outcome, scenario.expectedOutcome);
+      assert.equal(blocked.length, 1);
+      assert.equal(gates.length, scenario.expectedGates);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+}
 
 test('uses the reviewer session for reviewer blocked handoff locations', async () => {
   const root = await mkdtemp(join(tmpdir(), 'gis-review-handoff-'));

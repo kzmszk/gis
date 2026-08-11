@@ -34,8 +34,6 @@ export interface GisConfig {
   readonly profiles: ProfileConfig;
 }
 
-export type ConfigWarningSink = (message: string) => void;
-
 export class ConfigError extends Error {
   constructor(message: string, options?: ErrorOptions) {
     super(`invalid gis configuration: ${message}`, options);
@@ -337,10 +335,6 @@ export async function readConfig(cwd: string = process.cwd()): Promise<string> {
 
 export async function loadConfig(
   cwd: string = process.cwd(),
-  _warn: ConfigWarningSink = (message) => console.warn(message),
 ): Promise<GisConfig> {
-  // Review is a supported execution stage. Keep the warning callback in the
-  // public signature for callers that use it for their own diagnostics, but
-  // do not emit the old "not implemented" warning anymore.
   return parseConfig(await readConfig(cwd));
 }
