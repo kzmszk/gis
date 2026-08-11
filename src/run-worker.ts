@@ -32,6 +32,7 @@ import { runReviewLoop } from './review-loop.js';
 import type { AgentInfo, AgentSessionInfo } from './herdr.js';
 import type { MergeQueueItem, MergeResult } from './merge.js';
 import type { VerifyLoopOptions, VerifyLoopResult } from './verify.js';
+import { delay, errorMessage } from './internal.js';
 
 /** The terminal state recorded by a job in the foreground orchestration loop. */
 export type JobOutcome =
@@ -99,20 +100,6 @@ export interface BeadJobProcessorOptions {
   readonly report: (message: string) => void;
   /** Called when a worker creates a human gate, before the job is released. */
   readonly onHumanGate: (gate: Bead, locations: BeadHandoffLocations) => void;
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-function assertNever(value: never): never {
-  throw new Error(`unhandled worker result: ${JSON.stringify(value)}`);
-}
-
-function delay(milliseconds: number): Promise<void> {
-  return new Promise((resolvePromise) =>
-    setTimeout(resolvePromise, milliseconds),
-  );
 }
 
 function defaultTranscriptPath(kind: string, worktreePath: string): string {
@@ -291,11 +278,25 @@ export function createBeadJobProcessor(
       return { status: 'blocked' };
     }
 
+    if (started === undefined || workerKind === undefined) {
+      options.report(`gis: worker startup returned no worker for ${bead.id}`);
+      await options.beads.markBlocked(
+        bead.id,
+        handoff(
+          worktree,
+          defaultTranscriptPath(workerKind ?? 'unknown', worktree.path),
+        ),
+      );
+      return { status: 'blocked' };
+    }
+    const startedWorker = started;
+    const implementationKind = workerKind;
+
     const currentTranscriptPath = (): Promise<string> =>
       resolveWorkerTranscriptPath(
-        started!,
+        startedWorker,
         agentName,
-        workerKind!,
+        implementationKind,
         worktree.path,
         options.herdr,
         options.resolveTranscript,
@@ -307,7 +308,7 @@ export function createBeadJobProcessor(
       target: agentName,
       worktreePath: worktree.path,
       roundLogPath: worktree.runPath,
-      transcriptPath: defaultTranscriptPath(workerKind!, worktree.path),
+      transcriptPath: defaultTranscriptPath(implementationKind, worktree.path),
       resolveTranscriptPath: currentTranscriptPath,
       blockedTimeout: options.config.blocked_timeout,
       workerTimeout: options.config.worker_timeout,
@@ -332,8 +333,8 @@ export function createBeadJobProcessor(
     let result: ResultFileState;
     try {
       result = await waitForCurrentResult(
-        started.prompt.resultPath,
-        started.prompt.runId,
+        startedWorker.prompt.resultPath,
+        startedWorker.prompt.runId,
         options.config.blocked_timeout,
       );
     } catch (error: unknown) {
@@ -374,8 +375,17 @@ export function createBeadJobProcessor(
         await options.beads.markBlocked(bead.id, await currentHandoff());
         return { status: 'blocked' };
       }
-      default:
-        return assertNever(result);
+      default: {
+        // Keep the compile-time exhaustiveness check, but protect a running
+        // older JS artifact or malformed adapter value by retaining the bead.
+        const unexpected: never = result;
+        options.report(
+          `gis: worker result had an unknown kind for ${bead.id}: ` +
+            JSON.stringify(unexpected),
+        );
+        await options.beads.markBlocked(bead.id, await currentHandoff());
+        return { status: 'blocked' };
+      }
     }
 
     const verifyImplementation = async (
@@ -408,6 +418,13 @@ export function createBeadJobProcessor(
       }
 
       if (options.config.review) {
+        if (options.herdr.paneSplit === undefined) {
+          options.report(
+            `gis: review cannot start for ${bead.id}: herdr pane.split is unavailable`,
+          );
+          await options.beads.markBlocked(bead.id, await currentHandoff());
+          return { status: 'blocked' };
+        }
         const reviewerTranscriptPath = (
           reviewer: StartedReviewer,
         ): Promise<string> =>
@@ -425,7 +442,7 @@ export function createBeadJobProcessor(
           config: options.config,
           implementation: {
             agentName,
-            kind: workerKind!,
+            kind: implementationKind,
             candidate: implementationCandidate,
           },
           herdr: options.herdr as ReviewHerdrSource,

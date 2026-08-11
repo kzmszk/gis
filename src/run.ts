@@ -1,78 +1,47 @@
 import { resolve } from 'node:path';
-import type { Bead, BeadHandoffLocations, HumanGateRequest } from './beads.js';
+import type { Bead } from './beads.js';
 import { createBeadsAdapter } from './beads.js';
 import type { GisConfig } from './config.js';
 import { loadConfig } from './config.js';
 import { createHerdrAdapter } from './herdr.js';
 import type { AgentSessionInfo } from './herdr.js';
-import {
-  SerialMergeQueue,
-  type MergeQueueItem,
-  type MergeResult,
-} from './merge.js';
+import { SerialMergeQueue } from './merge.js';
 import { resolveAgentSessionTranscript } from './transcripts.js';
+import { waitForAgentWithBlockedHandling } from './blocked.js';
+import { runVerificationLoop } from './verify.js';
+import { createBeadWorktree } from './worktree.js';
+import type { CreateBeadWorktreeOptions } from './worktree.js';
+import { startWorker } from './worker.js';
 import {
-  waitForAgentWithBlockedHandling,
-  type AgentWaitHandlingResult,
-  type BlockedHerdrSource,
-} from './blocked.js';
-import { runVerificationLoop, type VerifyLoopResult } from './verify.js';
-import {
-  createBeadWorktree,
-  type BeadWorktree,
-  type CreateBeadWorktreeOptions,
-} from './worktree.js';
-import type { WorktreeLifecycleSource } from './worktree.js';
-import {
-  startWorker,
-  type StartWorkerOptions,
-  type StartedWorker,
-  type WorkerPromptSource,
-  type WorkerStartupSource,
-} from './worker.js';
-import type { ReviewHerdrSource } from './review.js';
-import { createBeadJobProcessor, type JobOutcome } from './run-worker.js';
+  createBeadJobProcessor,
+  type BeadJobBeadsSource,
+  type BeadJobBlockedSource,
+  type BeadJobHerdrSource,
+  type BeadJobMergeSource,
+  type BeadJobVerifySource,
+  type BeadJobWorkerSource,
+  type BeadJobWorktreeSource,
+  type JobOutcome,
+} from './run-worker.js';
+import { assertNever, delay } from './internal.js';
 
-export interface RunBeadsSource {
+export interface RunBeadsSource extends BeadJobBeadsSource {
   ready(): Promise<readonly Bead[]>;
-  dispatch(issueId: string, kind: string): Promise<Bead>;
   markMerged(issueId: string, reason?: string): Promise<Bead>;
-  markBlocked(issueId: string, locations: BeadHandoffLocations): Promise<Bead>;
-  createHumanGate(request: HumanGateRequest): Promise<Bead>;
   listHuman?(): Promise<readonly Bead[]>;
 }
 
-export type RunHerdrSource = WorktreeLifecycleSource &
-  WorkerStartupSource &
-  WorkerPromptSource &
-  BlockedHerdrSource & {
-    /** Herdr pane.split is required only when review=true. */
-    paneSplit?: ReviewHerdrSource['paneSplit'];
-  };
+export type RunHerdrSource = BeadJobHerdrSource;
 
-export interface RunWorktreeSource {
-  create(options: CreateBeadWorktreeOptions): Promise<BeadWorktree>;
-}
+export type RunWorktreeSource = BeadJobWorktreeSource;
 
-export interface RunWorkerSource {
-  start(options: StartWorkerOptions): Promise<StartedWorker>;
-}
+export type RunWorkerSource = BeadJobWorkerSource;
 
-export interface RunBlockedSource {
-  wait(
-    options: Parameters<typeof waitForAgentWithBlockedHandling>[0],
-  ): Promise<AgentWaitHandlingResult>;
-}
+export type RunBlockedSource = BeadJobBlockedSource;
 
-export interface RunVerifySource {
-  verify(
-    options: Parameters<typeof runVerificationLoop>[0],
-  ): Promise<VerifyLoopResult>;
-}
+export type RunVerifySource = BeadJobVerifySource;
 
-export interface RunMergeSource {
-  enqueue(item: MergeQueueItem): Promise<MergeResult>;
-}
+export type RunMergeSource = BeadJobMergeSource;
 
 export interface RunOptions {
   readonly cwd?: string;
@@ -176,16 +145,6 @@ function summaryText(
   humanWaiting: number,
 ): string {
   return `${merged}件マージ / ${blocked}件 blocked / ${humanWaiting}件が人間の確認待ち`;
-}
-
-function delay(milliseconds: number): Promise<void> {
-  return new Promise((resolvePromise) =>
-    setTimeout(resolvePromise, milliseconds),
-  );
-}
-
-function assertNever(value: never): never {
-  throw new Error(`unhandled job outcome: ${JSON.stringify(value)}`);
 }
 
 export function formatRunSummary(summary: Omit<RunSummary, 'text'>): string {
@@ -350,7 +309,7 @@ export async function runForegroundLoop(
       case 'human':
         break;
       default:
-        assertNever(completed.outcome);
+        assertNever(completed.outcome, 'unhandled job outcome');
     }
   }
 

@@ -23,6 +23,62 @@ const config = {
   },
 };
 
+test('retains an intended handoff when worktree creation fails', async () => {
+  const issue = {
+    id: 'gis-vst.worktree-failure',
+    title: 'worktree failure',
+    description: 'retain the failed worktree handoff',
+    status: 'open',
+    priority: 2,
+    issue_type: 'task',
+  };
+  const blocked = [];
+  const root = '/tmp/gis-run-worker-boundary';
+  const processor = createBeadJobProcessor({
+    cwd: root,
+    config,
+    beads: {
+      async dispatch() {
+        throw new Error('dispatch must not run');
+      },
+      async markBlocked(id, locations) {
+        blocked.push([id, locations]);
+        return { ...issue, status: 'blocked' };
+      },
+      async createHumanGate() {
+        throw new Error('human gate must not run');
+      },
+    },
+    herdr: {},
+    worktrees: {
+      async create() {
+        throw new Error('git worktree add failed');
+      },
+    },
+    workers: {},
+    blocked: {},
+    verify: {},
+    merge: {},
+    resolveTranscript: async () => undefined,
+    report: () => undefined,
+    onHumanGate: () => undefined,
+  });
+
+  assert.deepEqual(await processor(issue), { status: 'blocked' });
+  assert.deepEqual(blocked, [
+    [
+      issue.id,
+      {
+        worktreePath: `${root}/.worktrees/${issue.id}`,
+        roundLogPath: `${root}/.worktrees/${issue.id}/.gis/run`,
+        transcriptPath:
+          `${root}/.worktrees/${issue.id}/.gis/run/` +
+          'transcript-unknown.unresolved',
+      },
+    ],
+  ]);
+});
+
 test('worker service owns result handling and emits a human outcome at its boundary', async () => {
   const root = await mkdtemp(join(tmpdir(), 'gis-run-worker-'));
   const issue = {
