@@ -305,6 +305,7 @@ export async function runReviewLoop(
 
   let round = 1;
   let prompt = reviewer.selection.result.prompt;
+  let lastSlopFeedback = options.getSlopFeedback?.();
 
   while (true) {
     let reviewerStatus: 'done' | 'blocked';
@@ -419,7 +420,16 @@ export async function runReviewLoop(
             target: reviewer.agentName,
             round,
             implementationKind: options.implementation.kind,
-            feedback: [options.getSlopFeedback?.(), feedback]
+            feedback: [
+              (() => {
+                const current = options.getSlopFeedback?.();
+                const changed =
+                  current === lastSlopFeedback ? undefined : current;
+                lastSlopFeedback = current;
+                return changed;
+              })(),
+              feedback,
+            ]
               .filter((value): value is string => value !== undefined)
               .join('\n\n'),
             herdr: options.herdr,

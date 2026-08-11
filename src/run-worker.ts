@@ -33,6 +33,7 @@ import type { AgentInfo, AgentSessionInfo } from './herdr.js';
 import type { MergeQueueItem, MergeResult } from './merge.js';
 import {
   slopFeedback,
+  slopWorsened,
   type VerifyLoopOptions,
   type VerifyLoopResult,
 } from './verify.js';
@@ -416,14 +417,17 @@ export function createBeadJobProcessor(
       });
       if (verification.status === 'verified') {
         latestSlopFeedback = slopFeedback(verification.result);
-        if (latestSlopFeedback !== undefined) {
+        if (
+          latestSlopFeedback !== undefined &&
+          slopWorsened(verification.result)
+        ) {
           options.report(
             `gis: ${bead.id} ${latestSlopFeedback.replaceAll('\n', ' ')}`,
           );
           try {
             await options.herdr.agentPrompt(
               agentName,
-              `${latestSlopFeedback}\n\nKeep this in mind for subsequent changes.`,
+              `The latest verification passed, but the quality metrics worsened. This is informational only; consider it if you are asked to make further changes in this task.\n\n${latestSlopFeedback}`,
             );
           } catch (error: unknown) {
             options.report(

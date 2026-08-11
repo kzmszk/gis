@@ -3,7 +3,11 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { runVerificationLoop, slopFeedback } from '../dist/verify.js';
+import {
+  runVerificationLoop,
+  slopFeedback,
+  slopWorsened,
+} from '../dist/verify.js';
 
 const bead = {
   id: 'gis-vst.8',
@@ -76,7 +80,15 @@ test('formats the machine-readable slop report as informational feedback', () =>
   });
   assert.equal(
     feedback,
-    'SCBench-inspired quality report (informational; does not block this task):\n- verbosity: 18.00% (-2.00pt)\n- structural erosion: 42.00% (2.00pt)',
+    'SCBench-inspired quality report (informational; does not block this task). Lower is better for both metrics:\n- verbosity: duplicate normalized source-line blocks / source lines.\n- structural erosion: complexity mass concentrated in functions with CC > 10.\n- verbosity: 18.00% (-2.00pt)\n- structural erosion: 42.00% (+2.00pt)',
+  );
+  assert.equal(
+    slopWorsened({
+      passed: true,
+      stdout:
+        'GIS_SLOP_REPORT={"base":{"verbosity":0.2,"erosion":0.4},"current":{"verbosity":0.18,"erosion":0.42},"verbosityDelta":-0.02,"erosionDelta":0.02}',
+    }),
+    true,
   );
 });
 

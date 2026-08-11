@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { readdir, readFile } from 'node:fs/promises';
+import { readdir, readFile, stat } from 'node:fs/promises';
 import { join, relative } from 'node:path';
 import { promisify } from 'node:util';
 import ts from 'typescript';
@@ -54,10 +54,7 @@ function duplicateLineCount(sources: ReadonlyMap<string, string>): number {
   let offset = 0;
   for (const source of sources.values()) {
     const lines = sourceLines(source).map((line) =>
-      line
-        .replace(/\/\/.*$/, '')
-        .replace(/\s+/g, ' ')
-        .trim(),
+      line.replace(/\s+/g, ' ').trim(),
     );
     for (
       let start = 0;
@@ -83,6 +80,30 @@ function duplicateLineCount(sources: ReadonlyMap<string, string>): number {
     for (const match of matches) for (const line of match) duplicated.add(line);
   }
   return duplicated.size;
+}
+
+function sourceLineNumbers(source: string): Set<number> {
+  const result = new Set<number>();
+  let inBlockComment = false;
+  for (const [index, line] of source.split(/\r?\n/).entries()) {
+    const trimmed = line.trim();
+    if (inBlockComment) {
+      if (trimmed.includes('*/')) inBlockComment = false;
+      continue;
+    }
+    if (trimmed.startsWith('/*')) {
+      if (!trimmed.includes('*/')) inBlockComment = true;
+      continue;
+    }
+    if (
+      trimmed.length > 0 &&
+      !trimmed.startsWith('//') &&
+      !trimmed.startsWith('*')
+    ) {
+      result.add(index);
+    }
+  }
+  return result;
 }
 
 function isFunction(node: ts.Node): node is ts.FunctionLikeDeclaration {
@@ -129,6 +150,36 @@ function cyclomaticComplexity(
   return complexity;
 }
 
+/** Count a function's own SLOC, excluding nested function declarations. */
+function ownFunctionSloc(
+  file: ts.SourceFile,
+  functionNode: ts.FunctionLikeDeclaration,
+  sourceLines: ReadonlySet<number>,
+): number {
+  const body = functionNode.body;
+  if (body === undefined) return 0;
+  const start = file.getLineAndCharacterOfPosition(body.getStart(file)).line;
+  const end = file.getLineAndCharacterOfPosition(body.end).line;
+  const ownLines = new Set<number>();
+  for (let line = start; line <= end; line += 1) {
+    if (sourceLines.has(line)) ownLines.add(line);
+  }
+  const removeNested = (node: ts.Node): void => {
+    if (node !== functionNode && isFunction(node)) {
+      const nestedStart = file.getLineAndCharacterOfPosition(
+        node.getStart(file),
+      ).line;
+      const nestedEnd = file.getLineAndCharacterOfPosition(node.end).line;
+      for (let line = nestedStart; line <= nestedEnd; line += 1)
+        ownLines.delete(line);
+      return;
+    }
+    ts.forEachChild(node, removeNested);
+  };
+  ts.forEachChild(body, removeNested);
+  return Math.max(1, ownLines.size);
+}
+
 /** Measure SCBench-inspired duplication and complexity concentration for TypeScript sources. */
 export function measureSlop(sources: ReadonlyMap<string, string>): SlopScore {
   let loc = 0;
@@ -137,6 +188,7 @@ export function measureSlop(sources: ReadonlyMap<string, string>): SlopScore {
   let highComplexityMass = 0;
   for (const [path, source] of sources) {
     loc += sourceLines(source).length;
+    const lines = sourceLineNumbers(source);
     const file = ts.createSourceFile(
       path,
       source,
@@ -146,15 +198,10 @@ export function measureSlop(sources: ReadonlyMap<string, string>): SlopScore {
     const visit = (node: ts.Node): void => {
       if (isFunction(node) && node.body !== undefined) {
         functions += 1;
-        const start = file.getLineAndCharacterOfPosition(
-          node.body.getStart(file),
-        ).line;
-        const end = file.getLineAndCharacterOfPosition(node.body.end).line;
-        const mass =
-          cyclomaticComplexity(node) * Math.sqrt(Math.max(1, end - start + 1));
+        const complexity = cyclomaticComplexity(node);
+        const mass = complexity * Math.sqrt(ownFunctionSloc(file, node, lines));
         totalMass += mass;
-        if (cyclomaticComplexity(node) > HIGH_COMPLEXITY)
-          highComplexityMass += mass;
+        if (complexity > HIGH_COMPLEXITY) highComplexityMass += mass;
       }
       ts.forEachChild(node, visit);
     };
@@ -207,6 +254,18 @@ async function walkTypeScript(
   return paths;
 }
 
+async function baseTypeScriptPaths(
+  cwd: string,
+  ref: string,
+): Promise<string[]> {
+  const paths = (
+    await git(cwd, ['ls-tree', '-r', '--name-only', ref, '--', 'src'])
+  )
+    .split('\n')
+    .filter((path) => path.endsWith('.ts') && !path.endsWith('.d.ts'));
+  return paths;
+}
+
 async function git(cwd: string, args: string[]): Promise<string> {
   const { stdout } = await execFileAsync('git', args, {
     cwd,
@@ -219,12 +278,8 @@ async function sourceAtRef(
   cwd: string,
   ref: string,
   path: string,
-): Promise<string | undefined> {
-  try {
-    return await git(cwd, ['show', `${ref}:${path}`]);
-  } catch {
-    return undefined;
-  }
+): Promise<string> {
+  return git(cwd, ['show', `${ref}:${path}`]);
 }
 
 /** Compare the current src tree with its merge-base against a Git ref. */
@@ -235,14 +290,23 @@ export async function measureWorktreeSlop(
   const baseRefResolved = (
     await git(cwd, ['merge-base', baseRef, 'HEAD'])
   ).trim();
-  const paths = await walkTypeScript(join(cwd, 'src'));
+  const sourceRoot = join(cwd, 'src');
+  try {
+    if (!(await stat(sourceRoot)).isDirectory()) {
+      throw new Error('not a directory');
+    }
+  } catch {
+    throw new Error(`gis slop requires a src directory: ${sourceRoot}`);
+  }
+  const paths = await walkTypeScript(sourceRoot);
   const current = new Map<string, string>();
   const base = new Map<string, string>();
   for (const path of paths) {
     const repoPath = `src/${path}`;
     current.set(repoPath, await readFile(join(cwd, repoPath), 'utf8'));
-    const source = await sourceAtRef(cwd, baseRefResolved, repoPath);
-    if (source !== undefined) base.set(repoPath, source);
+  }
+  for (const path of await baseTypeScriptPaths(cwd, baseRefResolved)) {
+    base.set(path, await sourceAtRef(cwd, baseRefResolved, path));
   }
   return compareSlop(measureSlop(base), measureSlop(current));
 }

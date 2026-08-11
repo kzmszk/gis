@@ -11,6 +11,44 @@ import { measureWorktreeSlop, serializeSlopReport } from './slop.js';
 
 export { readConfig } from './config.js';
 
+export interface SlopCliOptions {
+  readonly base?: string;
+  readonly maxDelta: number;
+  readonly reportOnly: boolean;
+}
+
+export function parseSlopOptions(args: readonly string[]): SlopCliOptions {
+  let base: string | undefined;
+  let maxDelta = 0.02;
+  let reportOnly = false;
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index];
+    if (argument === '--base' && args[index + 1] !== undefined) {
+      base = args[++index];
+    } else if (argument === '--max-delta' && args[index + 1] !== undefined) {
+      maxDelta = Number(args[++index]);
+    } else if (argument === '--report') {
+      reportOnly = true;
+    } else {
+      throw new Error(
+        'usage: gis slop [--base <git-ref>] [--max-delta <fraction>] [--report]',
+      );
+    }
+  }
+  if (!Number.isFinite(maxDelta) || maxDelta < 0) {
+    throw new Error('slop max delta must be a non-negative number');
+  }
+  return { base, maxDelta, reportOnly };
+}
+
+async function configuredSlopBase(cwd: string): Promise<string> {
+  try {
+    return (await loadConfig(cwd)).base;
+  } catch {
+    return 'main';
+  }
+}
+
 export async function main(
   args: string[],
 ): Promise<RunSummary | InitResult | void> {
@@ -27,37 +65,18 @@ export async function main(
   }
 
   if (command === 'slop') {
-    let base = 'main';
-    let maxDelta = 0.02;
-    let reportOnly = false;
-    for (let index = 0; index < unexpectedArgs.length; index += 1) {
-      const argument = unexpectedArgs[index];
-      if (argument === '--base' && unexpectedArgs[index + 1] !== undefined) {
-        base = unexpectedArgs[++index];
-      } else if (
-        argument === '--max-delta' &&
-        unexpectedArgs[index + 1] !== undefined
-      ) {
-        maxDelta = Number(unexpectedArgs[++index]);
-      } else if (argument === '--report') {
-        reportOnly = true;
-      } else {
-        throw new Error(
-          'usage: gis slop [--base <git-ref>] [--max-delta <fraction>] [--report]',
-        );
-      }
-    }
-    if (!Number.isFinite(maxDelta) || maxDelta < 0) {
-      throw new Error('slop max delta must be a non-negative number');
-    }
-    const comparison = await measureWorktreeSlop(process.cwd(), base);
+    const options = parseSlopOptions(unexpectedArgs);
+    const comparison = await measureWorktreeSlop(
+      process.cwd(),
+      options.base ?? (await configuredSlopBase(process.cwd())),
+    );
     console.log(serializeSlopReport(comparison));
     if (
-      !reportOnly &&
-      (comparison.verbosityDelta > maxDelta ||
-        comparison.erosionDelta > maxDelta)
+      !options.reportOnly &&
+      (comparison.verbosityDelta > options.maxDelta ||
+        comparison.erosionDelta > options.maxDelta)
     ) {
-      throw new Error(`slop score regressed by more than ${maxDelta}`);
+      throw new Error(`slop score regressed by more than ${options.maxDelta}`);
     }
     return;
   }
