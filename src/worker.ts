@@ -5,7 +5,6 @@ import {
   createHerdrAdapter,
   type AgentPromptedResult,
   type AgentStartedResult,
-  type HerdrClient,
   type AgentStartOptions,
   type AgentPromptOptions,
   type SessionSnapshotResult,
@@ -38,9 +37,7 @@ export interface WorkerPrompt {
   readonly content: string;
 }
 
-export interface WorkerStartupSource {
-  agentStart(options: AgentStartOptions): Promise<AgentStartedResult>;
-  apiSnapshot(timeoutMs?: number): Promise<SessionSnapshotResult>;
+export interface WorkerPromptSource {
   agentPrompt(
     target: string,
     text: string,
@@ -48,12 +45,9 @@ export interface WorkerStartupSource {
   ): Promise<AgentPromptedResult>;
 }
 
-export interface WorkerPromptSource {
-  agentPrompt(
-    target: string,
-    text: string,
-    options?: AgentPromptOptions,
-  ): Promise<AgentPromptedResult>;
+export interface WorkerStartupSource extends WorkerPromptSource {
+  agentStart(options: AgentStartOptions): Promise<AgentStartedResult>;
+  apiSnapshot(timeoutMs?: number): Promise<SessionSnapshotResult>;
 }
 
 export interface PromptedWorker {
@@ -192,7 +186,7 @@ export async function writeWorkerPrompt(options: WorkerPromptOptions): Promise<W
 }
 
 function defaultHerdr(): WorkerStartupSource {
-  return createHerdrAdapter() as HerdrClient;
+  return createHerdrAdapter();
 }
 
 function promptAcceptanceOptions(timeoutMs: number): AgentPromptOptions {
@@ -241,8 +235,7 @@ async function waitForNamedAgentReady(
   deadline: number,
   idleFallbackMs: number,
 ): Promise<void> {
-  let idleSince: number | undefined;
-  let idleStateChangeSeq: number | undefined;
+  let stableIdle: { stateChangeSeq: number; since: number } | undefined;
   while (true) {
     const { snapshot } = await beforeDeadline(
       herdr.apiSnapshot(remainingTime(deadline)),
@@ -250,27 +243,28 @@ async function waitForNamedAgentReady(
       `waiting for agent ${name} readiness snapshot`,
     );
     const agent = snapshot.agents.find((candidate) => candidate.pane_id === paneId);
+    const stateChangeSeq = agent?.state_change_seq;
     const matchesStartedAgent = agent?.name === name &&
         agent.agent === kind &&
-        typeof agent.state_change_seq === "number" &&
-        agent.state_change_seq > previousStateChangeSeq;
+        typeof stateChangeSeq === "number" &&
+        stateChangeSeq > previousStateChangeSeq;
     if (matchesStartedAgent && agent.interactive_ready === true) {
       return;
     }
 
     if (matchesStartedAgent &&
+        typeof stateChangeSeq === "number" &&
         agent.launch_pending === true &&
         agent.agent_status === "idle") {
-      if (idleStateChangeSeq !== agent.state_change_seq) {
-        idleSince = Date.now();
-        idleStateChangeSeq = agent.state_change_seq;
+      const now = Date.now();
+      if (stableIdle === undefined || stableIdle.stateChangeSeq !== stateChangeSeq) {
+        stableIdle = { stateChangeSeq, since: now };
       }
-      if (idleSince !== undefined && Date.now() - idleSince >= idleFallbackMs) {
+      if (now - stableIdle.since >= idleFallbackMs) {
         return;
       }
     } else {
-      idleSince = undefined;
-      idleStateChangeSeq = undefined;
+      stableIdle = undefined;
     }
 
     const remainingMs = remainingTime(deadline);

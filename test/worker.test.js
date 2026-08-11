@@ -17,6 +17,61 @@ const bead = {
   acceptance_criteria: "The prompt file contains the task and the TUI receives one line.",
 };
 
+const paneId = "pane-gis-vst.6";
+const workspaceId = "workspace-gis-vst.6";
+const tabId = "tab-gis-vst.6";
+
+function agent(overrides = {}) {
+  return {
+    agent: "codex",
+    name: bead.id,
+    pane_id: paneId,
+    workspace_id: workspaceId,
+    tab_id: tabId,
+    agent_status: "working",
+    ...overrides,
+  };
+}
+
+function snapshot(agents = []) {
+  return {
+    type: "session_snapshot",
+    snapshot: {
+      version: "0.7.5",
+      protocol: 17,
+      workspaces: [],
+      tabs: [],
+      panes: [],
+      layouts: [],
+      agents,
+    },
+  };
+}
+
+function startedAgent(options, overrides = {}) {
+  return {
+    type: "agent_started",
+    agent: agent({ pane_id: options.paneId, ...overrides }),
+    argv: [],
+  };
+}
+
+function promptedAgent(overrides = {}) {
+  return { type: "agent_prompted", agent: agent(overrides) };
+}
+
+function startOptions(root, overrides = {}) {
+  return {
+    bead,
+    runPath: join(root, ".gis", "run"),
+    verifyCommand: "npm test",
+    paneId,
+    candidate: DEFAULT_CONFIG.profiles.implement[0],
+    config: DEFAULT_CONFIG,
+    ...overrides,
+  };
+}
+
 test("writes the detailed worker instructions and result protocol to prompt.md", async () => {
   const root = await mkdtemp(join(tmpdir(), "gis-worker-prompt-"));
   try {
@@ -55,66 +110,28 @@ test("starts the worker after writing prompt.md and injects exactly one TUI line
   const calls = [];
   let agentStarted = false;
   try {
-    const result = await startWorker({
-      bead,
-      runPath: join(root, ".gis", "run"),
-      verifyCommand: "npm test",
-      paneId: "pane-gis-vst.6",
-      candidate: DEFAULT_CONFIG.profiles.implement[0],
-      config: DEFAULT_CONFIG,
+    const result = await startWorker(startOptions(root, {
       herdr: {
         async agentStart(options) {
           calls.push({ type: "start", options });
           agentStarted = true;
           return {
-            type: "agent_started",
-            agent: {
-              pane_id: options.paneId,
-              workspace_id: "workspace-gis-vst.6",
-              tab_id: "tab-gis-vst.6",
-              agent_status: "working",
-            },
+            ...startedAgent(options),
             argv: [options.kind, ...(options.args ?? [])],
           };
         },
         async apiSnapshot() {
           calls.push({ type: "snapshot" });
-          return {
-            type: "session_snapshot",
-            snapshot: {
-              version: "0.7.5",
-              protocol: 17,
-              workspaces: [],
-              tabs: [],
-              panes: [],
-              layouts: [],
-              agents: agentStarted ? [{
-                agent: "codex",
-                name: bead.id,
-                pane_id: "pane-gis-vst.6",
-                workspace_id: "workspace-gis-vst.6",
-                tab_id: "tab-gis-vst.6",
-                agent_status: "working",
-                interactive_ready: true,
-                state_change_seq: 2,
-              }] : [],
-            },
-          };
+          return snapshot(agentStarted
+            ? [agent({ interactive_ready: true, state_change_seq: 2 })]
+            : []);
         },
         async agentPrompt(target, text, options) {
           calls.push({ type: "prompt", target, text, options });
-          return {
-            type: "agent_prompted",
-            agent: {
-              pane_id: "pane-gis-vst.6",
-              workspace_id: "workspace-gis-vst.6",
-              tab_id: "tab-gis-vst.6",
-              agent_status: "working",
-            },
-          };
+          return promptedAgent();
         },
       },
-    });
+    }));
 
     assert.equal(await readFile(result.prompt.path, "utf8"), result.prompt.content);
     assert.deepEqual(calls.map(({ type }) => type), [
@@ -158,84 +175,25 @@ test("waits for the named agent in the target pane to become interactive-ready",
   const calls = [];
   let snapshots = 0;
   try {
-    await startWorker({
-      bead,
-      runPath: join(root, ".gis", "run"),
-      verifyCommand: "npm test",
-      paneId: "pane-gis-vst.6",
-      candidate: DEFAULT_CONFIG.profiles.implement[0],
-      config: DEFAULT_CONFIG,
+    await startWorker(startOptions(root, {
       herdr: {
         async agentStart(options) {
           calls.push("start");
-          return {
-            type: "agent_started",
-            agent: {
-              pane_id: options.paneId,
-              workspace_id: "workspace-gis-vst.6",
-              tab_id: "tab-gis-vst.6",
-              agent_status: "working",
-            },
-            argv: [],
-          };
+          return startedAgent(options);
         },
         async apiSnapshot() {
           calls.push("snapshot");
           snapshots += 1;
-          return {
-            type: "session_snapshot",
-            snapshot: {
-              version: "0.7.5",
-              protocol: 17,
-              workspaces: [],
-              tabs: [],
-              panes: [],
-              layouts: [],
-              agents: snapshots === 1 ? [{
-                agent: "codex",
-                name: bead.id,
-                pane_id: "pane-gis-vst.6",
-                workspace_id: "workspace-gis-vst.6",
-                tab_id: "tab-gis-vst.6",
-                agent_status: "working",
-                interactive_ready: true,
-                state_change_seq: 10,
-              }] : snapshots === 2 ? [{
-                agent: "claude",
-                name: bead.id,
-                pane_id: "pane-gis-vst.6",
-                workspace_id: "workspace-gis-vst.6",
-                tab_id: "tab-gis-vst.6",
-                agent_status: "working",
-                interactive_ready: true,
-                state_change_seq: 11,
-              }] : [{
-                agent: "codex",
-                name: bead.id,
-                pane_id: "pane-gis-vst.6",
-                workspace_id: "workspace-gis-vst.6",
-                tab_id: "tab-gis-vst.6",
-                agent_status: "working",
-                interactive_ready: true,
-                state_change_seq: 11,
-              }],
-            },
-          };
+          const kind = snapshots === 2 ? "claude" : "codex";
+          const stateChangeSeq = snapshots === 1 ? 10 : 11;
+          return snapshot([agent({ agent: kind, interactive_ready: true, state_change_seq: stateChangeSeq })]);
         },
         async agentPrompt() {
           calls.push("prompt");
-          return {
-            type: "agent_prompted",
-            agent: {
-              pane_id: "pane-gis-vst.6",
-              workspace_id: "workspace-gis-vst.6",
-              tab_id: "tab-gis-vst.6",
-              agent_status: "working",
-            },
-          };
+          return promptedAgent();
         },
       },
-    });
+    }));
 
     assert.deepEqual(calls, ["snapshot", "start", "snapshot", "snapshot", "prompt"]);
   } finally {
@@ -248,67 +206,26 @@ test("falls back after the exact launch-pending agent stays idle", async () => {
   const calls = [];
   let started = false;
   try {
-    await startWorker({
-      bead,
-      runPath: join(root, ".gis", "run"),
-      verifyCommand: "npm test",
-      paneId: "pane-gis-vst.6",
-      candidate: DEFAULT_CONFIG.profiles.implement[0],
-      config: DEFAULT_CONFIG,
+    await startWorker(startOptions(root, {
       idleReadinessFallbackMs: 1,
       herdr: {
         async agentStart(options) {
           calls.push("start");
           started = true;
-          return {
-            type: "agent_started",
-            agent: {
-              pane_id: options.paneId,
-              workspace_id: "workspace-gis-vst.6",
-              tab_id: "tab-gis-vst.6",
-              agent_status: "idle",
-            },
-            argv: [],
-          };
+          return startedAgent(options, { agent_status: "idle" });
         },
         async apiSnapshot() {
           calls.push("snapshot");
-          return {
-            type: "session_snapshot",
-            snapshot: {
-              version: "0.7.5",
-              protocol: 17,
-              workspaces: [],
-              tabs: [],
-              panes: [],
-              layouts: [],
-              agents: started ? [{
-                agent: "codex",
-                name: bead.id,
-                pane_id: "pane-gis-vst.6",
-                workspace_id: "workspace-gis-vst.6",
-                tab_id: "tab-gis-vst.6",
-                agent_status: "idle",
-                launch_pending: true,
-                state_change_seq: 11,
-              }] : [],
-            },
-          };
+          return snapshot(started
+            ? [agent({ agent_status: "idle", launch_pending: true, state_change_seq: 11 })]
+            : []);
         },
         async agentPrompt() {
           calls.push("prompt");
-          return {
-            type: "agent_prompted",
-            agent: {
-              pane_id: "pane-gis-vst.6",
-              workspace_id: "workspace-gis-vst.6",
-              tab_id: "tab-gis-vst.6",
-              agent_status: "working",
-            },
-          };
+          return promptedAgent();
         },
       },
-    });
+    }));
 
     assert.deepEqual(calls, ["snapshot", "start", "snapshot", "snapshot", "prompt"]);
   } finally {
@@ -322,68 +239,29 @@ test("restarts the idle fallback window when the agent state sequence changes", 
   let started = false;
   let readySnapshots = 0;
   try {
-    await startWorker({
-      bead,
-      runPath: join(root, ".gis", "run"),
-      verifyCommand: "npm test",
-      paneId: "pane-gis-vst.6",
-      candidate: DEFAULT_CONFIG.profiles.implement[0],
-      config: DEFAULT_CONFIG,
+    await startWorker(startOptions(root, {
       idleReadinessFallbackMs: 1,
       herdr: {
         async agentStart(options) {
           calls.push("start");
           started = true;
-          return {
-            type: "agent_started",
-            agent: {
-              pane_id: options.paneId,
-              workspace_id: "workspace-gis-vst.6",
-              tab_id: "tab-gis-vst.6",
-              agent_status: "idle",
-            },
-            argv: [],
-          };
+          return startedAgent(options, { agent_status: "idle" });
         },
         async apiSnapshot() {
           calls.push("snapshot");
           if (started) readySnapshots += 1;
-          return {
-            type: "session_snapshot",
-            snapshot: {
-              version: "0.7.5",
-              protocol: 17,
-              workspaces: [],
-              tabs: [],
-              panes: [],
-              layouts: [],
-              agents: started ? [{
-                agent: "codex",
-                name: bead.id,
-                pane_id: "pane-gis-vst.6",
-                workspace_id: "workspace-gis-vst.6",
-                tab_id: "tab-gis-vst.6",
-                agent_status: "idle",
-                launch_pending: true,
-                state_change_seq: readySnapshots === 1 ? 11 : 12,
-              }] : [],
-            },
-          };
+          return snapshot(started ? [agent({
+            agent_status: "idle",
+            launch_pending: true,
+            state_change_seq: readySnapshots === 1 ? 11 : 12,
+          })] : []);
         },
         async agentPrompt() {
           calls.push("prompt");
-          return {
-            type: "agent_prompted",
-            agent: {
-              pane_id: "pane-gis-vst.6",
-              workspace_id: "workspace-gis-vst.6",
-              tab_id: "tab-gis-vst.6",
-              agent_status: "working",
-            },
-          };
+          return promptedAgent();
         },
       },
-    });
+    }));
 
     assert.deepEqual(calls, [
       "snapshot",
@@ -404,50 +282,24 @@ test("does not prompt or classify readiness snapshot failure as start failure", 
   let snapshots = 0;
   try {
     await assert.rejects(
-      startWorker({
-        bead,
-        runPath: join(root, ".gis", "run"),
-        verifyCommand: "npm test",
-        paneId: "pane-gis-vst.6",
-        candidate: DEFAULT_CONFIG.profiles.implement[0],
-        config: DEFAULT_CONFIG,
+      startWorker(startOptions(root, {
         herdr: {
           async agentStart(options) {
-            return {
-              type: "agent_started",
-              agent: {
-                pane_id: options.paneId,
-                workspace_id: "workspace-gis-vst.6",
-                tab_id: "tab-gis-vst.6",
-                agent_status: "working",
-              },
-              argv: [],
-            };
+            return startedAgent(options);
           },
           async apiSnapshot() {
             snapshots += 1;
             if (snapshots > 1) {
               throw new Error("snapshot unavailable");
             }
-            return {
-              type: "session_snapshot",
-              snapshot: {
-                version: "0.7.5",
-                protocol: 17,
-                workspaces: [],
-                tabs: [],
-                panes: [],
-                layouts: [],
-                agents: [],
-              },
-            };
+            return snapshot();
           },
           async agentPrompt() {
             prompted = true;
             throw new Error("must not be called");
           },
         },
-      }),
+      })),
       (error) => {
         assert.ok(error instanceof WorkerStartupError);
         assert.equal(error.phase, "readiness");
@@ -465,19 +317,14 @@ test("rejects a worker timeout that herdr agent.start cannot accept", async () =
   const root = await mkdtemp(join(tmpdir(), "gis-worker-invalid-timeout-"));
   try {
     await assert.rejects(
-      startWorker({
-        bead,
-        runPath: join(root, ".gis", "run"),
-        verifyCommand: "npm test",
-        paneId: "pane-gis-vst.6",
-        candidate: DEFAULT_CONFIG.profiles.implement[0],
+      startWorker(startOptions(root, {
         config: { ...DEFAULT_CONFIG, worker_timeout: "3000ms" },
         herdr: {
           async agentStart() { throw new Error("must not be called"); },
           async apiSnapshot() { throw new Error("must not be called"); },
           async agentPrompt() { throw new Error("must not be called"); },
         },
-      }),
+      })),
       /worker_timeout must be greater than 3000ms/,
     );
   } finally {

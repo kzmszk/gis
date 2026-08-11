@@ -112,18 +112,12 @@ export interface WorktreeRemovedResult {
   forced: boolean;
 }
 
-export interface AgentInfo {
+export interface AgentInfo extends PaneInfo {
   agent?: string | null;
-  pane_id: string;
-  workspace_id: string;
-  tab_id: string;
   name?: string | null;
-  agent_status: AgentStatus;
   interactive_ready?: boolean;
   launch_pending?: boolean;
   state_change_seq?: number;
-  agent_session?: AgentSessionInfo | null;
-  [key: string]: unknown;
 }
 
 export interface AgentSessionInfo {
