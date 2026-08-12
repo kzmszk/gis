@@ -1,5 +1,5 @@
 import { createBeadsAdapter } from './beads.js';
-import type { Bead } from './beads.js';
+import type { Bead, BeadHandoffLocations } from './beads.js';
 import type { GisConfig } from './config.js';
 import { loadConfig } from './config.js';
 import { createHerdrAdapter } from './herdr.js';
@@ -115,39 +115,58 @@ function defaultWorkers(herdr: RunHerdrSource): RunWorkerSource {
   };
 }
 
-/** Every collaborator `runForegroundLoop` needs, with defaults applied. */
-interface ResolvedRunDependencies {
+/** Resolve the reporting sink, independent of every other collaborator. */
+function resolveReport(options: RunOptions): (message: string) => void {
+  return options.report ?? ((message: string) => console.log(message));
+}
+
+/** Called when a worker itself raises a human gate, before its job is released. */
+type OnHumanGate = (gate: Bead, locations: BeadHandoffLocations) => void;
+
+/** What `runForegroundLoop` needs to dispatch and process ready beads. */
+interface Dispatcher {
+  /** Runs one bead to a terminal `JobOutcome`, retaining state for recovery on failure. */
+  readonly processBead: (bead: Bead) => Promise<JobOutcome>;
   readonly beads: RunBeadsSource;
-  readonly herdr: RunHerdrSource;
-  readonly worktrees: RunWorktreeSource;
-  readonly workers: RunWorkerSource;
-  readonly blocked: RunBlockedSource;
-  readonly verify: RunVerifySource;
-  readonly merge: RunMergeSource;
-  readonly resolveTranscript: NonNullable<RunOptions['resolveTranscript']>;
-  readonly report: (message: string) => void;
 }
 
 /**
- * Resolve every optional `RunOptions` collaborator to a concrete adapter,
- * constructing the production implementation for anything the caller did
- * not supply.
+ * Build the dispatcher `runForegroundLoop` schedules ready beads against.
  *
- * Interface: pass the raw `options`, the already-resolved `cwd`, and the
- * already-resolved `config` (both must be resolved first since several
+ * Resolves every optional `RunOptions` collaborator to a concrete adapter
+ * (constructing the production implementation for anything the caller did
+ * not supply) and wires them into a single `processBead` function via
+ * `createBeadJobProcessor`. Interface: pass the raw `options`, the
+ * already-resolved `cwd` and `config` (both required first since several
  * defaults, e.g. the merge queue and the beads adapter, are built from
- * them). No I/O beyond constructing in-memory adapter objects; the beads
- * adapter itself is the only default that touches the filesystem
- * indirectly (via `createBeadsAdapter`'s own lazy behavior). Order is
- * significant: `herdr` must resolve before `worktrees`/`workers` (both
- * default to wrapping it), and `beads` must resolve before `merge`
- * (its default embeds it).
+ * them), the already-resolved `report` sink, and `onHumanGate`, invoked
+ * when a worker raises a human checkpoint mid-job. Both `report` and
+ * `onHumanGate` are taken as parameters rather than resolved here because
+ * the caller typically needs `report` before it can build `onHumanGate`
+ * (e.g. to feed a `HumanGateTracker`); resolving `report` via
+ * `resolveReport` is independent of every other collaborator, so the
+ * caller can do that once, share the single result with both `humanGate`
+ * and this function, and never create a resolution cycle. No I/O beyond
+ * constructing in-memory adapter objects; the beads adapter is the only
+ * default that touches the filesystem indirectly (via `createBeadsAdapter`'s
+ * own lazy behavior). Throws `ConfigError` if `config.review` is enabled
+ * but the resolved `herdr` adapter does not support `pane.split`
+ * (delegated to `createBeadJobProcessor`).
+ *
+ * Deletion test: removing this function pushes the resolution of the eight
+ * remaining `RunOptions` collaborators (`beads`, `herdr`, `worktrees`,
+ * `workers`, `blocked`, `verify`, `merge`, `resolveTranscript`), their
+ * relative ordering (`herdr` before `worktrees`/`workers`, `beads` before
+ * `merge`), and the `createBeadJobProcessor` wiring back into
+ * `runForegroundLoop`, its sole caller.
  */
-function resolveRunDependencies(
+function createDispatcher(
   options: RunOptions,
   cwd: string,
   config: GisConfig,
-): ResolvedRunDependencies {
+  report: (message: string) => void,
+  onHumanGate: OnHumanGate,
+): Dispatcher {
   const beads = options.beads ?? createBeadsAdapter({ cwd });
   const herdr = options.herdr ?? createHerdrAdapter();
   const worktrees =
@@ -184,8 +203,10 @@ function resolveRunDependencies(
     });
   const resolveTranscript =
     options.resolveTranscript ?? resolveAgentSessionTranscript;
-  const report = options.report ?? ((message: string) => console.log(message));
-  return {
+
+  const processBead = createBeadJobProcessor({
+    cwd,
+    config,
     beads,
     herdr,
     worktrees,
@@ -195,7 +216,10 @@ function resolveRunDependencies(
     merge,
     resolveTranscript,
     report,
-  };
+    onHumanGate,
+  });
+
+  return { processBead, beads };
 }
 
 function resolveInitialMerged(options: RunOptions): number {
@@ -288,25 +312,29 @@ export async function runForegroundLoop(
   const config = options.config ?? (await loadConfig(cwd));
   requirePositiveInteger(config.concurrency, 'concurrency');
 
-  const deps = resolveRunDependencies(options, cwd, config);
-  const { beads, report } = deps;
-
-  const active = new Map<string, Promise<JobOutcome>>();
-  const humanGate = new HumanGateTracker(report);
+  // Both option validations run before createDispatcher so that a caller
+  // passing several invalid options still sees the RangeError first, as it
+  // did when createBeadJobProcessor (which can throw ConfigError) was wired
+  // up here rather than inside the dispatcher.
   const humanPollIntervalMs = resolveHumanPollIntervalMs(options);
   const counts: JobOutcomeCounts = {
     merged: resolveInitialMerged(options),
     blocked: 0,
   };
 
-  const processBead = createBeadJobProcessor({
+  const report = resolveReport(options);
+  const humanGate = new HumanGateTracker(report);
+  const { processBead, beads } = createDispatcher(
+    options,
     cwd,
     config,
-    ...deps,
-    onHumanGate: (gate, locations) => {
+    report,
+    (gate, locations) => {
       humanGate.recordFromWorker(gate, locations.worktreePath);
     },
-  });
+  );
+
+  const active = new Map<string, Promise<JobOutcome>>();
 
   while (true) {
     fillActiveSlots(
