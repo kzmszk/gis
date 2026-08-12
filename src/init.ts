@@ -218,16 +218,37 @@ async function updateGitignore(cwd: string): Promise<void> {
   );
 }
 
-/** Initialize a repository with a default-first interactive GIS setup. */
-export async function initializeProject(
-  options: InitOptions = {},
-): Promise<InitResult> {
+type Answer = (question: string) => Promise<string>;
+type Report = (message: string) => void;
+type RunCommand = NonNullable<InitOptions['runCommand']>;
+
+/**
+ * Owns the interactive-prompt lifecycle for one `initializeProject` run.
+ *
+ * Invariants:
+ * - `close()` is always safe to call (a no-op unless a live readline
+ *   interface was opened) and must be called exactly once, even on failure.
+ * - `answer` never touches the terminal in `--defaults` mode; it resolves
+ *   to `''` so every question falls back to its default.
+ * - Opening a live terminal requires both `stdin` and `stdout` to be a TTY;
+ *   otherwise construction throws before any prompt is shown.
+ */
+interface RunContext {
+  readonly cwd: string;
+  readonly defaults: boolean;
+  readonly report: Report;
+  readonly runCommand: RunCommand;
+  readonly answer: Answer;
+  readonly close: () => void;
+}
+
+function createRunContext(options: InitOptions): RunContext {
   const cwd = resolve(options.cwd ?? process.cwd());
   const defaults = options.defaults ?? false;
   const report = options.report ?? ((message: string) => console.log(message));
   const runCommand = options.runCommand ?? defaultRunCommand;
-  let closePrompt: (() => void) | undefined;
   let ask = options.ask;
+  let close = (): void => undefined;
 
   if (!defaults && ask === undefined) {
     if (!stdin.isTTY || !stdout.isTTY) {
@@ -237,144 +258,238 @@ export async function initializeProject(
     }
     const terminal = createInterface({ input: stdin, output: stdout });
     ask = (question) => terminal.question(question);
-    closePrompt = () => terminal.close();
+    close = () => terminal.close();
   }
 
-  const answer = async (question: string): Promise<string> =>
-    defaults ? '' : ask!(question);
+  const answer: Answer = async (question) => (defaults ? '' : ask!(question));
 
-  try {
-    report(`GISプロジェクトを初期化します: ${cwd}`);
-    const configPath = resolve(cwd, CONFIG_RELATIVE_PATH);
-    if (await pathExists(configPath)) {
-      if (defaults) {
-        throw new Error(
-          `${CONFIG_RELATIVE_PATH} は既に存在します。対話モードで上書きを確認してください`,
-        );
-      }
-      const overwrite = await askYesNo(
+  return { cwd, defaults, report, runCommand, answer, close };
+}
+
+/**
+ * Guards the target config path before anything else runs.
+ *
+ * Returns `false` (after reporting the cancellation) when the caller should
+ * abort with `{ status: 'cancelled' }`. Throws instead of prompting when
+ * `--defaults` finds an existing config, since there is no one to confirm
+ * an overwrite with.
+ */
+async function ensureConfigWritable(
+  configPath: string,
+  defaults: boolean,
+  answer: Answer,
+  report: Report,
+): Promise<boolean> {
+  if (!(await pathExists(configPath))) return true;
+  if (defaults) {
+    throw new Error(
+      `${CONFIG_RELATIVE_PATH} は既に存在します。対話モードで上書きを確認してください`,
+    );
+  }
+  const overwrite = await askYesNo(
+    answer,
+    `${CONFIG_RELATIVE_PATH} は既に存在します。上書きしますか?`,
+    false,
+    report,
+  );
+  if (!overwrite) {
+    report('gis: 初期化をキャンセルしました');
+    return false;
+  }
+  return true;
+}
+
+interface CollectedAnswers {
+  readonly initializeGit: boolean;
+  readonly initializeBeads: boolean;
+  readonly base: string;
+  readonly verify: string;
+  readonly concurrencyText: string;
+  readonly kindsText: string;
+  readonly prefix: string | undefined;
+}
+
+/**
+ * Runs every setup question in the fixed order the CLI has always asked
+ * them in (Git, then Beads, then base/verify/concurrency/kinds, then the
+ * Beads prefix if Beads is being initialized). Detection (`detectGit`,
+ * `detectVerifyCommand`, an existing `.beads` directory) supplies the
+ * default each question offers; `--defaults` mode accepts every default
+ * without prompting.
+ */
+async function collectAnswers(
+  cwd: string,
+  runCommand: RunCommand,
+  answer: Answer,
+  report: Report,
+): Promise<CollectedAnswers> {
+  const git = await detectGit(cwd, runCommand);
+  const initializeGit = git.exists
+    ? false
+    : await askYesNo(answer, 'Gitリポジトリを初期化しますか?', true, report);
+  const beadsExists = await pathExists(resolve(cwd, '.beads'));
+  const initializeBeads = beadsExists
+    ? false
+    : await askYesNo(answer, 'Beadsを初期化しますか?', true, report);
+  const base = await askValue(
+    answer,
+    'baseブランチ',
+    git.base,
+    (value) => (value.trim() ? undefined : 'baseブランチは空にできません'),
+    report,
+  );
+  const verify = await askValue(
+    answer,
+    '検証コマンド',
+    await detectVerifyCommand(cwd),
+    (value) => (value.trim() ? undefined : '検証コマンドは空にできません'),
+    report,
+  );
+  const concurrencyText = await askValue(
+    answer,
+    '並列タスク数',
+    String(DEFAULT_CONFIG.concurrency),
+    (value) =>
+      /^[1-9]\d*$/.test(value)
+        ? undefined
+        : '並列タスク数には正の整数を指定してください',
+    report,
+  );
+  const kindsText = await askValue(
+    answer,
+    '利用するエージェント（カンマ区切り）',
+    DEFAULT_CONFIG.kinds.join(','),
+    (value) =>
+      value
+        .split(',')
+        .map((kind) => kind.trim())
+        .every(Boolean)
+        ? undefined
+        : 'エージェントを1つ以上指定してください',
+    report,
+  );
+  const prefix = initializeBeads
+    ? await askValue(
         answer,
-        `${CONFIG_RELATIVE_PATH} は既に存在します。上書きしますか?`,
-        false,
+        'Beadsのissue prefix',
+        defaultPrefix(cwd),
+        (value) =>
+          /^[a-z][a-z0-9-]*$/.test(value)
+            ? undefined
+            : 'prefixは小文字英数字で始め、使用できる文字は小文字英数字とハイフンです',
         report,
-      );
-      if (!overwrite) {
-        report('gis: 初期化をキャンセルしました');
-        return { status: 'cancelled' };
-      }
-    }
+      )
+    : undefined;
 
-    const git = await detectGit(cwd, runCommand);
-    const initializeGit = git.exists
-      ? false
-      : await askYesNo(answer, 'Gitリポジトリを初期化しますか?', true, report);
-    const beadsExists = await pathExists(resolve(cwd, '.beads'));
-    const initializeBeads = beadsExists
-      ? false
-      : await askYesNo(answer, 'Beadsを初期化しますか?', true, report);
-    const base = await askValue(
-      answer,
-      'baseブランチ',
-      git.base,
-      (value) => (value.trim() ? undefined : 'baseブランチは空にできません'),
-      report,
-    );
-    const verify = await askValue(
-      answer,
-      '検証コマンド',
-      await detectVerifyCommand(cwd),
-      (value) => (value.trim() ? undefined : '検証コマンドは空にできません'),
-      report,
-    );
-    const concurrencyText = await askValue(
-      answer,
-      '並列タスク数',
-      String(DEFAULT_CONFIG.concurrency),
-      (value) =>
-        /^[1-9]\d*$/.test(value)
-          ? undefined
-          : '並列タスク数には正の整数を指定してください',
-      report,
-    );
-    const kindsText = await askValue(
-      answer,
-      '利用するエージェント（カンマ区切り）',
-      DEFAULT_CONFIG.kinds.join(','),
-      (value) =>
-        value
-          .split(',')
-          .map((kind) => kind.trim())
-          .every(Boolean)
-          ? undefined
-          : 'エージェントを1つ以上指定してください',
-      report,
-    );
-    const prefix = initializeBeads
-      ? await askValue(
-          answer,
-          'Beadsのissue prefix',
-          defaultPrefix(cwd),
-          (value) =>
-            /^[a-z][a-z0-9-]*$/.test(value)
-              ? undefined
-              : 'prefixは小文字英数字で始め、使用できる文字は小文字英数字とハイフンです',
-          report,
-        )
-      : undefined;
+  return {
+    initializeGit,
+    initializeBeads,
+    base,
+    verify,
+    concurrencyText,
+    kindsText,
+    prefix,
+  };
+}
 
-    report('');
-    report(`  Git初期化: ${initializeGit ? `はい (${base})` : '不要'}`);
-    report(`  Beads初期化: ${initializeBeads ? `はい (${prefix})` : '不要'}`);
-    report(`  検証: ${verify}`);
-    report(`  並列数: ${concurrencyText}`);
-    report(`  エージェント: ${kindsText}`);
-    const proceed = await askYesNo(
-      answer,
-      'この設定で作成しますか?',
-      true,
-      report,
+/**
+ * Carries out the confirmed plan: runs `git init`/`bd init` when requested
+ * (in that order), then validates and persists `.gis/config.toml` and
+ * updates `.gitignore`. Assumes the caller already confirmed the plan;
+ * every step here is a real filesystem or subprocess side effect.
+ */
+async function applyDecisions(
+  cwd: string,
+  configPath: string,
+  runCommand: RunCommand,
+  answers: CollectedAnswers,
+): Promise<void> {
+  if (answers.initializeGit) {
+    await runCommand('git', ['init', '-b', answers.base], cwd);
+  }
+  if (answers.initializeBeads) {
+    await runCommand(
+      'bd',
+      ['init', '--non-interactive', '--prefix', answers.prefix!],
+      cwd,
     );
-    if (!proceed) {
-      report('gis: 初期化をキャンセルしました');
+  }
+
+  const config: GisConfig = {
+    ...DEFAULT_CONFIG,
+    concurrency: Number(answers.concurrencyText),
+    base: answers.base,
+    verify: answers.verify,
+    kinds: answers.kindsText.split(',').map((kind) => kind.trim()),
+  };
+  const contents = serializeConfig(config);
+  parseConfig(contents);
+  await mkdir(resolve(cwd, '.gis'), { recursive: true });
+  await writeFile(configPath, contents, 'utf8');
+  await updateGitignore(cwd);
+}
+
+/** Initialize a repository with a default-first interactive GIS setup. */
+export async function initializeProject(
+  options: InitOptions = {},
+): Promise<InitResult> {
+  const ctx = createRunContext(options);
+  try {
+    ctx.report(`GISプロジェクトを初期化します: ${ctx.cwd}`);
+    const configPath = resolve(ctx.cwd, CONFIG_RELATIVE_PATH);
+    if (
+      !(await ensureConfigWritable(
+        configPath,
+        ctx.defaults,
+        ctx.answer,
+        ctx.report,
+      ))
+    ) {
       return { status: 'cancelled' };
     }
 
-    if (initializeGit) {
-      await runCommand('git', ['init', '-b', base], cwd);
-    }
-    if (initializeBeads) {
-      await runCommand(
-        'bd',
-        ['init', '--non-interactive', '--prefix', prefix!],
-        cwd,
-      );
+    const answers = await collectAnswers(
+      ctx.cwd,
+      ctx.runCommand,
+      ctx.answer,
+      ctx.report,
+    );
+
+    ctx.report('');
+    ctx.report(
+      `  Git初期化: ${answers.initializeGit ? `はい (${answers.base})` : '不要'}`,
+    );
+    ctx.report(
+      `  Beads初期化: ${answers.initializeBeads ? `はい (${answers.prefix})` : '不要'}`,
+    );
+    ctx.report(`  検証: ${answers.verify}`);
+    ctx.report(`  並列数: ${answers.concurrencyText}`);
+    ctx.report(`  エージェント: ${answers.kindsText}`);
+    const proceed = await askYesNo(
+      ctx.answer,
+      'この設定で作成しますか?',
+      true,
+      ctx.report,
+    );
+    if (!proceed) {
+      ctx.report('gis: 初期化をキャンセルしました');
+      return { status: 'cancelled' };
     }
 
-    const config: GisConfig = {
-      ...DEFAULT_CONFIG,
-      concurrency: Number(concurrencyText),
-      base,
-      verify,
-      kinds: kindsText.split(',').map((kind) => kind.trim()),
-    };
-    const contents = serializeConfig(config);
-    parseConfig(contents);
-    await mkdir(resolve(cwd, '.gis'), { recursive: true });
-    await writeFile(configPath, contents, 'utf8');
-    await updateGitignore(cwd);
+    await applyDecisions(ctx.cwd, configPath, ctx.runCommand, answers);
 
-    report('');
-    report(`gis: 初期化しました: ${configPath}`);
-    report(
+    ctx.report('');
+    ctx.report(`gis: 初期化しました: ${configPath}`);
+    ctx.report(
       '次の手順: 設定とプロジェクトファイルをコミットし、Beadを作成して gis run を実行してください',
     );
     return {
       status: 'initialized',
       configPath,
-      gitInitialized: initializeGit,
-      beadsInitialized: initializeBeads,
+      gitInitialized: answers.initializeGit,
+      beadsInitialized: answers.initializeBeads,
     };
   } finally {
-    closePrompt?.();
+    ctx.close();
   }
 }
