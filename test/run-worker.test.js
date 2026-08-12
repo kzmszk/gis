@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createBeadJobProcessor } from '../dist/run-worker.js';
-import { WorkerStartupError } from '../dist/worker.js';
+import { WorkerStartupError, herdrAgentName } from '../dist/worker.js';
 import { ConfigError } from '../dist/config.js';
 
 const config = {
@@ -509,6 +509,811 @@ test('does not double markBlocked when waitForWorker observes AlreadyBlockedErro
     assert.deepEqual(outcome, { status: 'blocked' });
     assert.equal(waitCalls, 2);
     assert.equal(blocked.length, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('marks the bead blocked when the result file never appears before blocked_timeout elapses', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'gis-run-worker-result-timeout-'));
+  const issue = {
+    id: 'gis-vst.result-timeout',
+    title: 'result timeout',
+    description: 'time out waiting for a result file that is never written',
+    status: 'open',
+    priority: 2,
+    issue_type: 'task',
+  };
+  const blocked = [];
+  let humanGateCalls = 0;
+  let verifyCalls = 0;
+  let mergeCalls = 0;
+
+  try {
+    const processor = createBeadJobProcessor({
+      cwd: root,
+      config: { ...config, blocked_timeout: '1ms' },
+      beads: {
+        async dispatch() {
+          return { ...issue, status: 'in_progress' };
+        },
+        async markBlocked(id, locations) {
+          blocked.push([id, locations]);
+          return { ...issue, status: 'blocked' };
+        },
+        async createHumanGate() {
+          humanGateCalls += 1;
+          throw new Error('human gate must not run');
+        },
+      },
+      herdr: {},
+      worktrees: {
+        async create() {
+          return {
+            beadId: issue.id,
+            path: join(root, 'worktree'),
+            runPath: join(root, 'worktree', '.gis', 'run'),
+            workspaceId: 'workspace',
+            paneId: 'pane',
+            async remove() {},
+          };
+        },
+      },
+      workers: {
+        async start() {
+          return {
+            prompt: { resultPath: join(root, 'never-written.json') },
+            started: {},
+            prompted: {},
+          };
+        },
+      },
+      blocked: {
+        async wait() {
+          return { status: 'done', wasBlocked: false, worktreeRetained: true };
+        },
+      },
+      verify: {
+        async verify() {
+          verifyCalls += 1;
+          throw new Error('verify must not run when the result never arrives');
+        },
+      },
+      merge: {
+        async enqueue() {
+          mergeCalls += 1;
+          throw new Error('merge must not run when the result never arrives');
+        },
+      },
+      resolveTranscript: async () => undefined,
+      report: () => undefined,
+      onHumanGate: () => undefined,
+    });
+
+    const outcome = await processor(issue);
+
+    assert.deepEqual(outcome, { status: 'blocked' });
+    assert.equal(blocked.length, 1);
+    assert.equal(blocked[0][0], issue.id);
+    assert.equal(humanGateCalls, 0);
+    assert.equal(verifyCalls, 0);
+    assert.equal(mergeCalls, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('falls back to the default transcript path when resolveTranscript throws', async () => {
+  const root = await mkdtemp(
+    join(tmpdir(), 'gis-run-worker-transcript-throws-'),
+  );
+  const issue = {
+    id: 'gis-vst.transcript-resolve-throws',
+    title: 'transcript resolve throws',
+    description: 'fall back to the default transcript path on a resolver error',
+    status: 'open',
+    priority: 2,
+    issue_type: 'task',
+  };
+  const blocked = [];
+  let humanGateCalls = 0;
+  const worktree = {
+    beadId: issue.id,
+    path: join(root, 'worktree'),
+    runPath: join(root, 'worktree', '.gis', 'run'),
+    workspaceId: 'workspace',
+    paneId: 'pane',
+    async remove() {},
+  };
+
+  try {
+    const processor = createBeadJobProcessor({
+      cwd: root,
+      config,
+      beads: {
+        async dispatch() {
+          return { ...issue, status: 'in_progress' };
+        },
+        async markBlocked(id, locations) {
+          blocked.push([id, locations]);
+          return { ...issue, status: 'blocked' };
+        },
+        async createHumanGate() {
+          humanGateCalls += 1;
+          throw new Error('human gate must not run');
+        },
+      },
+      herdr: {},
+      worktrees: {
+        async create() {
+          return worktree;
+        },
+      },
+      workers: {
+        async start() {
+          return {
+            prompt: { resultPath: join(root, 'result.json') },
+            started: {},
+            prompted: {
+              agent: {
+                agent_session: { session_id: 'session-1' },
+                pane_id: 'pane-1',
+              },
+            },
+          };
+        },
+      },
+      blocked: {
+        async wait() {
+          throw new Error('herdr wait crashed');
+        },
+      },
+      verify: {},
+      merge: {},
+      resolveTranscript: async () => {
+        throw new Error('transcript resolver crashed');
+      },
+      report: () => undefined,
+      onHumanGate: () => undefined,
+    });
+
+    const outcome = await processor(issue);
+
+    assert.deepEqual(outcome, { status: 'blocked' });
+    assert.equal(blocked.length, 1);
+    assert.equal(humanGateCalls, 0);
+    assert.deepEqual(blocked[0][1], {
+      worktreePath: worktree.path,
+      roundLogPath: worktree.runPath,
+      transcriptPath: join(
+        worktree.path,
+        '.gis',
+        'run',
+        'transcript-codex.unresolved',
+      ),
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('marks the bead blocked when reading the result file raises instead of returning missing', async () => {
+  const root = await mkdtemp(
+    join(tmpdir(), 'gis-run-worker-result-read-throws-'),
+  );
+  const issue = {
+    id: 'gis-vst.result-read-throws',
+    title: 'result read throws',
+    description: 'handle a result read failure that is not a missing file',
+    status: 'open',
+    priority: 2,
+    issue_type: 'task',
+  };
+  const blocked = [];
+  let humanGateCalls = 0;
+  let verifyCalls = 0;
+  let mergeCalls = 0;
+
+  try {
+    const processor = createBeadJobProcessor({
+      cwd: root,
+      config,
+      beads: {
+        async dispatch() {
+          return { ...issue, status: 'in_progress' };
+        },
+        async markBlocked(id, locations) {
+          blocked.push([id, locations]);
+          return { ...issue, status: 'blocked' };
+        },
+        async createHumanGate() {
+          humanGateCalls += 1;
+          throw new Error('human gate must not run');
+        },
+      },
+      herdr: {},
+      worktrees: {
+        async create() {
+          return {
+            beadId: issue.id,
+            path: join(root, 'worktree'),
+            runPath: join(root, 'worktree', '.gis', 'run'),
+            workspaceId: 'workspace',
+            paneId: 'pane',
+            async remove() {},
+          };
+        },
+      },
+      workers: {
+        async start() {
+          // A directory path makes readFile fail with EISDIR rather than
+          // ENOENT, so readWorkerResult rethrows instead of reporting missing.
+          return {
+            prompt: { resultPath: root },
+            started: {},
+            prompted: {},
+          };
+        },
+      },
+      blocked: {
+        async wait() {
+          return { status: 'done', wasBlocked: false, worktreeRetained: true };
+        },
+      },
+      verify: {
+        async verify() {
+          verifyCalls += 1;
+          throw new Error('verify must not run when the result read fails');
+        },
+      },
+      merge: {
+        async enqueue() {
+          mergeCalls += 1;
+          throw new Error('merge must not run when the result read fails');
+        },
+      },
+      resolveTranscript: async () => undefined,
+      report: () => undefined,
+      onHumanGate: () => undefined,
+    });
+
+    const outcome = await processor(issue);
+
+    assert.deepEqual(outcome, { status: 'blocked' });
+    assert.equal(blocked.length, 1);
+    assert.equal(humanGateCalls, 0);
+    assert.equal(verifyCalls, 0);
+    assert.equal(mergeCalls, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('delivers worsened slop feedback to the agent and reports when delivery fails', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'gis-run-worker-slop-worsened-'));
+  const issue = {
+    id: 'gis-vst.slop-worsened',
+    title: 'slop worsened',
+    description: 'report worsened quality metrics and a failed delivery',
+    status: 'open',
+    priority: 2,
+    issue_type: 'task',
+  };
+  const resultPath = join(root, 'result.json');
+  const reports = [];
+  const promptCalls = [];
+  let markBlockedCalls = 0;
+  let humanGateCalls = 0;
+
+  await writeFile(
+    resultPath,
+    JSON.stringify({ status: 'done', summary: 'implemented' }),
+  );
+
+  try {
+    const processor = createBeadJobProcessor({
+      cwd: root,
+      config,
+      beads: {
+        async dispatch() {
+          return { ...issue, status: 'in_progress' };
+        },
+        async markBlocked() {
+          markBlockedCalls += 1;
+          throw new Error('markBlocked must not run on a merged outcome');
+        },
+        async createHumanGate() {
+          humanGateCalls += 1;
+          throw new Error('human gate must not run');
+        },
+      },
+      herdr: {
+        async agentPrompt(target, message) {
+          promptCalls.push([target, message]);
+          throw new Error('herdr prompt channel down');
+        },
+      },
+      worktrees: {
+        async create() {
+          return {
+            beadId: issue.id,
+            path: join(root, 'worktree'),
+            runPath: join(root, 'worktree', '.gis', 'run'),
+            workspaceId: 'workspace',
+            paneId: 'pane',
+            async remove() {},
+          };
+        },
+      },
+      workers: {
+        async start() {
+          return {
+            prompt: { resultPath },
+            started: {},
+            prompted: {},
+          };
+        },
+      },
+      blocked: {
+        async wait() {
+          return { status: 'done', wasBlocked: false, worktreeRetained: true };
+        },
+      },
+      verify: {
+        async verify() {
+          const report = {
+            base: { verbosity: 0, erosion: 0 },
+            current: { verbosity: 0.1, erosion: 0.1 },
+            verbosityDelta: 0.05,
+            erosionDelta: 0.05,
+          };
+          return {
+            status: 'verified',
+            attempts: 1,
+            result: {
+              passed: true,
+              stdout: `GIS_SLOP_REPORT=${JSON.stringify(report)}`,
+            },
+          };
+        },
+      },
+      merge: {
+        async enqueue() {
+          return { status: 'merged' };
+        },
+      },
+      resolveTranscript: async () => undefined,
+      report: (message) => reports.push(message),
+      onHumanGate: () => undefined,
+    });
+
+    const outcome = await processor(issue);
+
+    assert.deepEqual(outcome, { status: 'merged' });
+    assert.equal(promptCalls.length, 1);
+    assert.equal(promptCalls[0][0], herdrAgentName(issue.id));
+    assert.ok(
+      reports.some(
+        (message) =>
+          message.includes(issue.id) && message.includes('verbosity'),
+      ),
+    );
+    assert.ok(
+      reports.some((message) =>
+        message.includes('could not deliver informational slop report'),
+      ),
+    );
+    assert.equal(markBlockedCalls, 0);
+    assert.equal(humanGateCalls, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('returns blocked directly when initial verification is blocked', async () => {
+  const root = await mkdtemp(
+    join(tmpdir(), 'gis-run-worker-verify-blocked-initial-'),
+  );
+  const issue = {
+    id: 'gis-vst.verify-blocked-initial',
+    title: 'verify blocked initial',
+    description:
+      'return blocked when the initial verification cycle is blocked',
+    status: 'open',
+    priority: 2,
+    issue_type: 'task',
+  };
+  const resultPath = join(root, 'result.json');
+  let humanGateCalls = 0;
+  let mergeCalls = 0;
+
+  await writeFile(
+    resultPath,
+    JSON.stringify({ status: 'done', summary: 'implemented' }),
+  );
+
+  try {
+    const processor = createBeadJobProcessor({
+      cwd: root,
+      config,
+      beads: {
+        async dispatch() {
+          return { ...issue, status: 'in_progress' };
+        },
+        async markBlocked() {
+          return { ...issue, status: 'blocked' };
+        },
+        async createHumanGate() {
+          humanGateCalls += 1;
+          throw new Error('human gate must not run');
+        },
+      },
+      herdr: {},
+      worktrees: {
+        async create() {
+          return {
+            beadId: issue.id,
+            path: join(root, 'worktree'),
+            runPath: join(root, 'worktree', '.gis', 'run'),
+            workspaceId: 'workspace',
+            paneId: 'pane',
+            async remove() {},
+          };
+        },
+      },
+      workers: {
+        async start() {
+          return {
+            prompt: { resultPath },
+            started: {},
+            prompted: {},
+          };
+        },
+      },
+      blocked: {
+        async wait() {
+          return { status: 'done', wasBlocked: false, worktreeRetained: true };
+        },
+      },
+      verify: {
+        async verify() {
+          return {
+            status: 'blocked',
+            attempts: 1,
+            result: { passed: false },
+            handoff: {
+              worktreePath: join(root, 'worktree'),
+              roundLogPath: join(root, 'worktree', '.gis', 'run'),
+              transcriptPath: join(root, 'transcript.unresolved'),
+            },
+            bead: issue,
+          };
+        },
+      },
+      merge: {
+        async enqueue() {
+          mergeCalls += 1;
+          throw new Error(
+            'merge must not run once initial verification is blocked',
+          );
+        },
+      },
+      resolveTranscript: async () => undefined,
+      report: () => undefined,
+      onHumanGate: () => undefined,
+    });
+
+    const outcome = await processor(issue);
+
+    assert.deepEqual(outcome, { status: 'blocked' });
+    assert.equal(mergeCalls, 0);
+    assert.equal(humanGateCalls, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('reports state and cleanup errors surfaced by a merged outcome', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'gis-run-worker-merge-errors-'));
+  const issue = {
+    id: 'gis-vst.merge-errors',
+    title: 'merge errors',
+    description:
+      'report state and cleanup errors on an otherwise merged outcome',
+    status: 'open',
+    priority: 2,
+    issue_type: 'task',
+  };
+  const resultPath = join(root, 'result.json');
+  const reports = [];
+  let markBlockedCalls = 0;
+  let humanGateCalls = 0;
+
+  await writeFile(
+    resultPath,
+    JSON.stringify({ status: 'done', summary: 'implemented' }),
+  );
+
+  try {
+    const processor = createBeadJobProcessor({
+      cwd: root,
+      config,
+      beads: {
+        async dispatch() {
+          return { ...issue, status: 'in_progress' };
+        },
+        async markBlocked() {
+          markBlockedCalls += 1;
+          throw new Error('markBlocked must not run on a merged outcome');
+        },
+        async createHumanGate() {
+          humanGateCalls += 1;
+          throw new Error('human gate must not run');
+        },
+      },
+      herdr: {},
+      worktrees: {
+        async create() {
+          return {
+            beadId: issue.id,
+            path: join(root, 'worktree'),
+            runPath: join(root, 'worktree', '.gis', 'run'),
+            workspaceId: 'workspace',
+            paneId: 'pane',
+            async remove() {},
+          };
+        },
+      },
+      workers: {
+        async start() {
+          return {
+            prompt: { resultPath },
+            started: {},
+            prompted: {},
+          };
+        },
+      },
+      blocked: {
+        async wait() {
+          return { status: 'done', wasBlocked: false, worktreeRetained: true };
+        },
+      },
+      verify: {
+        async verify() {
+          return {
+            status: 'verified',
+            attempts: 1,
+            result: { passed: true, stdout: '' },
+          };
+        },
+      },
+      merge: {
+        async enqueue() {
+          return {
+            status: 'merged',
+            stateError: new Error('bd close failed'),
+            cleanupError: new Error('worktree remove failed'),
+          };
+        },
+      },
+      resolveTranscript: async () => undefined,
+      report: (message) => reports.push(message),
+      onHumanGate: () => undefined,
+    });
+
+    const outcome = await processor(issue);
+
+    assert.deepEqual(outcome, { status: 'merged' });
+    assert.ok(
+      reports.some((message) =>
+        message.includes('closing the Beads issue failed'),
+      ),
+    );
+    assert.ok(reports.some((message) => message.includes('cleanup failed')));
+    assert.equal(markBlockedCalls, 0);
+    assert.equal(humanGateCalls, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('returns blocked without re-marking when merge enqueue itself reports blocked', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'gis-run-worker-merge-blocked-'));
+  const issue = {
+    id: 'gis-vst.merge-blocked',
+    title: 'merge blocked',
+    description: 'propagate a blocked outcome reported by merge.enqueue',
+    status: 'open',
+    priority: 2,
+    issue_type: 'task',
+  };
+  const resultPath = join(root, 'result.json');
+  const reports = [];
+  let markBlockedCalls = 0;
+  let humanGateCalls = 0;
+
+  await writeFile(
+    resultPath,
+    JSON.stringify({ status: 'done', summary: 'implemented' }),
+  );
+
+  try {
+    const processor = createBeadJobProcessor({
+      cwd: root,
+      config,
+      beads: {
+        async dispatch() {
+          return { ...issue, status: 'in_progress' };
+        },
+        async markBlocked() {
+          markBlockedCalls += 1;
+          throw new Error(
+            'merge.enqueue owns marking blocked on its own outcome',
+          );
+        },
+        async createHumanGate() {
+          humanGateCalls += 1;
+          throw new Error('human gate must not run');
+        },
+      },
+      herdr: {},
+      worktrees: {
+        async create() {
+          return {
+            beadId: issue.id,
+            path: join(root, 'worktree'),
+            runPath: join(root, 'worktree', '.gis', 'run'),
+            workspaceId: 'workspace',
+            paneId: 'pane',
+            async remove() {},
+          };
+        },
+      },
+      workers: {
+        async start() {
+          return {
+            prompt: { resultPath },
+            started: {},
+            prompted: {},
+          };
+        },
+      },
+      blocked: {
+        async wait() {
+          return { status: 'done', wasBlocked: false, worktreeRetained: true };
+        },
+      },
+      verify: {
+        async verify() {
+          return {
+            status: 'verified',
+            attempts: 1,
+            result: { passed: true, stdout: '' },
+          };
+        },
+      },
+      merge: {
+        async enqueue() {
+          return {
+            status: 'blocked',
+            phase: 'merge',
+            bead: issue,
+            handoff: {
+              worktreePath: join(root, 'worktree'),
+              roundLogPath: join(root, 'worktree', '.gis', 'run'),
+              transcriptPath: join(root, 'transcript.unresolved'),
+            },
+          };
+        },
+      },
+      resolveTranscript: async () => undefined,
+      report: (message) => reports.push(message),
+      onHumanGate: () => undefined,
+    });
+
+    const outcome = await processor(issue);
+
+    assert.deepEqual(outcome, { status: 'blocked' });
+    assert.equal(markBlockedCalls, 0);
+    assert.equal(humanGateCalls, 0);
+    assert.ok(
+      !reports.some((message) =>
+        message.includes('failed while recording recovery state'),
+      ),
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('marks the bead blocked when merge enqueue throws an unexpected error', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'gis-run-worker-merge-throws-'));
+  const issue = {
+    id: 'gis-vst.merge-throws',
+    title: 'merge throws',
+    description: 'record a blocked handoff when merge.enqueue raises',
+    status: 'open',
+    priority: 2,
+    issue_type: 'task',
+  };
+  const resultPath = join(root, 'result.json');
+  const blocked = [];
+  let humanGateCalls = 0;
+
+  await writeFile(
+    resultPath,
+    JSON.stringify({ status: 'done', summary: 'implemented' }),
+  );
+
+  try {
+    const processor = createBeadJobProcessor({
+      cwd: root,
+      config,
+      beads: {
+        async dispatch() {
+          return { ...issue, status: 'in_progress' };
+        },
+        async markBlocked(id, locations) {
+          blocked.push([id, locations]);
+          return { ...issue, status: 'blocked' };
+        },
+        async createHumanGate() {
+          humanGateCalls += 1;
+          throw new Error('human gate must not run');
+        },
+      },
+      herdr: {},
+      worktrees: {
+        async create() {
+          return {
+            beadId: issue.id,
+            path: join(root, 'worktree'),
+            runPath: join(root, 'worktree', '.gis', 'run'),
+            workspaceId: 'workspace',
+            paneId: 'pane',
+            async remove() {},
+          };
+        },
+      },
+      workers: {
+        async start() {
+          return {
+            prompt: { resultPath },
+            started: {},
+            prompted: {},
+          };
+        },
+      },
+      blocked: {
+        async wait() {
+          return { status: 'done', wasBlocked: false, worktreeRetained: true };
+        },
+      },
+      verify: {
+        async verify() {
+          return {
+            status: 'verified',
+            attempts: 1,
+            result: { passed: true, stdout: '' },
+          };
+        },
+      },
+      merge: {
+        async enqueue() {
+          throw new Error('merge queue crashed');
+        },
+      },
+      resolveTranscript: async () => undefined,
+      report: () => undefined,
+      onHumanGate: () => undefined,
+    });
+
+    const outcome = await processor(issue);
+
+    assert.deepEqual(outcome, { status: 'blocked' });
+    assert.equal(blocked.length, 1);
+    assert.equal(blocked[0][0], issue.id);
+    assert.equal(humanGateCalls, 0);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
