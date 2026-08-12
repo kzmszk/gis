@@ -55,6 +55,37 @@ const bead = {
 };
 const agentName = herdrAgentName(bead.id);
 
+/** A late-recovery candidate whose worktree has an unparseable rev-list
+ * count. Exercises the real `GitMergeAdapter.hasCommits()` guard (and its
+ * exact error message) through `recoverLateCompletions`'s default adapters,
+ * instead of a fake that merely re-throws a hand-authored string. */
+const lateBrokenBead = {
+  id: 'gis-vst.late-broken',
+  title: 'late recovery: broken',
+  description:
+    'late-recovery integration fixture with an invalid rev-list count',
+  status: 'blocked',
+  priority: 2,
+  issue_type: 'task',
+  notes: 'failure phase: commit\nno commit ahead of base',
+};
+
+/** A late-recovery candidate that completes a full real-adapter merge:
+ * `mergeGit.hasCommits`, `SerialMergeQueue.enqueue`, and
+ * `herdr.worktreeRemove` receiving the workspace id resolved from the
+ * snapshot -- the loop body `recoverLateCompletions` runs through default
+ * (non-DI) adapters, which the in-memory-fake tests in
+ * test/late-recovery.test.js do not exercise. */
+const lateOkBead = {
+  id: 'gis-vst.late-ok',
+  title: 'late recovery: ok',
+  description: 'late-recovery integration fixture that fully merges',
+  status: 'blocked',
+  priority: 2,
+  issue_type: 'task',
+  notes: 'failure phase: commit\nno commit ahead of base',
+};
+
 async function writeFakeCommands(root) {
   const bin = join(root, 'bin');
   await mkdir(bin, { recursive: true });
@@ -72,6 +103,8 @@ if (args[0] === "ready") {
   process.stdout.write(JSON.stringify(state.status === "open" ? [outputBead()] : []) + "\\n");
 } else if (args[0] === "list" && args.includes("--status=in_progress")) {
   process.stdout.write(JSON.stringify(state.status === "in_progress" ? [outputBead()] : []) + "\\n");
+} else if (args[0] === "list" && args.includes("--status=blocked")) {
+  process.stdout.write(JSON.stringify([${JSON.stringify(lateBrokenBead)}, ${JSON.stringify(lateOkBead)}]) + "\\n");
 } else if (args[0] === "list" && args.includes("--label=human")) {
   process.stdout.write("[]\\n");
 } else if (args[0] === "update" && args.includes("--status=in_progress")) {
@@ -79,9 +112,14 @@ if (args[0] === "ready") {
   await writeFile(process.env.GIS_BD_STATE, JSON.stringify(state), "utf8");
   process.stdout.write(JSON.stringify([outputBead()]) + "\\n");
 } else if (args[0] === "close") {
-  state.status = "closed";
-  await writeFile(process.env.GIS_BD_STATE, JSON.stringify(state), "utf8");
-  process.stdout.write(JSON.stringify([outputBead()]) + "\\n");
+  const id = args[1];
+  if (id === ${JSON.stringify(lateOkBead.id)}) {
+    process.stdout.write(JSON.stringify([{ ...${JSON.stringify(lateOkBead)}, status: "closed" }]) + "\\n");
+  } else {
+    state.status = "closed";
+    await writeFile(process.env.GIS_BD_STATE, JSON.stringify(state), "utf8");
+    process.stdout.write(JSON.stringify([outputBead()]) + "\\n");
+  }
 } else {
   process.stdout.write("[]\\n");
 }
@@ -95,9 +133,15 @@ import { appendFile } from "node:fs/promises";
 const args = process.argv.slice(2);
 await appendFile(process.env.GIS_GIT_LOG, JSON.stringify(args) + "\\n");
 if (args[0] === "worktree" && args[1] === "list") {
-  process.stdout.write("worktree " + process.env.GIS_BASE_PATH + "\\nHEAD base\\nbranch refs/heads/main\\n");
+  process.stdout.write(
+    "worktree " + process.env.GIS_BASE_PATH + "\\nHEAD base\\nbranch refs/heads/main\\n\\n" +
+    "worktree " + process.env.GIS_LATE_BROKEN_PATH + "\\nHEAD 0000000000000000000000000000000000000000\\nbranch refs/heads/${lateBrokenBead.id}\\n\\n" +
+    "worktree " + process.env.GIS_LATE_OK_PATH + "\\nHEAD 0000000000000000000000000000000000000000\\nbranch refs/heads/${lateOkBead.id}\\n\\n"
+  );
 } else if (args.includes("rev-list")) {
-  process.stdout.write("1\\n");
+  // args = ["-C", "<path>", "rev-list", "--count", "main..HEAD"]
+  const path = args[1];
+  process.stdout.write(path === process.env.GIS_LATE_BROKEN_PATH ? "not-a-number\\n" : "1\\n");
 }
 `,
     'utf8',
@@ -107,13 +151,13 @@ if (args[0] === "worktree" && args[1] === "list") {
   return bin;
 }
 
-function snapshot(agents = []) {
+function snapshot(agents = [], workspaces = []) {
   return {
     type: 'session_snapshot',
     snapshot: {
       version: '0.7.5',
       protocol: 17,
-      workspaces: [],
+      workspaces,
       tabs: [],
       panes: [],
       layouts: [],
@@ -129,6 +173,8 @@ test('gis run connects default bd, herdr, and git adapters through merge cleanup
   const gitLogPath = join(root, 'git.log');
   const socketPath = join(root, 'herdr.sock');
   const worktreePath = join(root, 'worktrees', bead.id);
+  const lateBrokenWorktreePath = join(root, 'worktrees', lateBrokenBead.id);
+  const lateOkWorktreePath = join(root, 'worktrees', lateOkBead.id);
   const baseCwd = await realpath(root);
   const herdrEvents = [];
   let agentStarted = false;
@@ -136,6 +182,37 @@ test('gis run connects default bd, herdr, and git adapters through merge cleanup
   let agentSessionReported = false;
   await mkdir(join(root, '.gis'), { recursive: true });
   await writeFile(statePath, JSON.stringify({ status: 'open' }), 'utf8');
+  // The broken late-recovery candidate's worktree only needs to exist as a
+  // directory: its real GitMergeAdapter.hasCommits() call fails on the
+  // unparseable rev-list count before any file inside it is read.
+  await mkdir(lateBrokenWorktreePath, { recursive: true });
+  // The ok late-recovery candidate needs a real prompt + result pair on
+  // disk, since currentResult() in late-recovery.ts reads them directly
+  // (it is not behind an injectable seam).
+  await mkdir(join(lateOkWorktreePath, '.gis', 'run'), { recursive: true });
+  await writeFile(
+    join(lateOkWorktreePath, '.gis', 'run', 'implement-prompt.md'),
+    [
+      '# gis worker task',
+      '',
+      '- Run ID: `cli-late-ok-1`',
+      '',
+      '## Result file',
+      '',
+      'Before finishing, write a JSON result to `.gis/run/round-1-impl.json`.',
+      '',
+    ].join('\n'),
+    'utf8',
+  );
+  await writeFile(
+    join(lateOkWorktreePath, '.gis', 'run', 'round-1-impl.json'),
+    JSON.stringify({
+      run_id: 'cli-late-ok-1',
+      status: 'done',
+      summary: 'late completion recovered via cli integration',
+    }),
+    'utf8',
+  );
   await writeFile(
     join(root, '.gis', 'config.toml'),
     [
@@ -193,6 +270,20 @@ test('gis run connects default bd, herdr, and git adapters through merge cleanup
                 },
               ]
             : [],
+          // Always present, from the very first snapshot on: this is what
+          // lets recoverLateCompletions's default (non-DI) herdr adapter
+          // resolve a workspace id for each late-recovery candidate's
+          // worktree.
+          [
+            {
+              workspace_id: `ws-${lateBrokenBead.id}`,
+              worktree: { checkout_path: lateBrokenWorktreePath },
+            },
+            {
+              workspace_id: `ws-${lateOkBead.id}`,
+              worktree: { checkout_path: lateOkWorktreePath },
+            },
+          ],
         );
       } else if (request.method === 'worktree.create') {
         await mkdir(join(root, 'worktrees', bead.id, '.gis', 'run'), {
@@ -270,11 +361,15 @@ test('gis run connects default bd, herdr, and git adapters through merge cleanup
           },
         };
       } else if (request.method === 'worktree.remove') {
+        const workspaceId = request.params.workspace_id;
         result = {
           type: 'worktree_removed',
-          workspace_id: `ws-${bead.id}`,
-          path: worktreePath,
-          forced: true,
+          workspace_id: workspaceId,
+          path:
+            workspaceId === `ws-${lateOkBead.id}`
+              ? lateOkWorktreePath
+              : worktreePath,
+          forced: request.params.force === true,
         };
       } else {
         throw new Error(`unexpected herdr method ${request.method}`);
@@ -303,13 +398,29 @@ test('gis run connects default bd, herdr, and git adapters through merge cleanup
           GIS_BD_LOG: bdLogPath,
           GIS_GIT_LOG: gitLogPath,
           GIS_BASE_PATH: root,
+          GIS_LATE_BROKEN_PATH: lateBrokenWorktreePath,
+          GIS_LATE_OK_PATH: lateOkWorktreePath,
         },
       },
     );
 
+    // 2 = the late-ok candidate recovered by recoverLateCompletions's
+    // default (real) adapters at startup, plus the 1 the run loop merges
+    // afterwards.
     assert.match(
       result.stdout,
-      /1件マージ \/ 0件 blocked \/ 0件が人間の確認待ち/,
+      /2件マージ \/ 0件 blocked \/ 0件が人間の確認待ち/,
+    );
+    // The late-broken candidate's failure report is only produced if the
+    // real GitMergeAdapter.hasCommits() guard actually throws on the
+    // unparseable rev-list count (instead of silently treating it as "no
+    // commits ahead"); this is what keeps the guard and its message honest
+    // through the default (non-DI) adapter path, since the fake used by the
+    // "reports a per-bead failure" test in late-recovery.test.js re-throws
+    // a hand-authored copy of this string rather than the real one.
+    assert.match(
+      result.stderr,
+      /late completion recovery failed for gis-vst\.late-broken.*invalid count/,
     );
     assert.equal(
       JSON.parse(await readFile(statePath, 'utf8')).status,
@@ -318,6 +429,10 @@ test('gis run connects default bd, herdr, and git adapters through merge cleanup
     assert.deepEqual(herdrEvents, [
       'session.snapshot',
       'session.snapshot',
+      // The late-ok candidate's cleanup: herdr.worktreeRemove receiving the
+      // workspace id resolved from the startup snapshot, driven entirely by
+      // recoverLateCompletions's default adapters (no DI fakes).
+      'worktree.remove',
       'worktree.create',
       'session.snapshot',
       'agent.start',
@@ -337,6 +452,21 @@ test('gis run connects default bd, herdr, and git adapters through merge cleanup
       [
         ['worktree', 'list', '--porcelain'],
         ['worktree', 'list', '--porcelain'],
+        // recoverLateCompletions's own hasCommits() gate for each
+        // late-recovery candidate, in blocked-list order. The broken
+        // candidate's real GitMergeAdapter.hasCommits() throws here (an
+        // unparseable rev-list count), which is caught and reported without
+        // aborting the rest of the loop -- so no further git calls for it.
+        ['-C', lateBrokenWorktreePath, 'rev-list', '--count', 'main..HEAD'],
+        ['-C', lateOkWorktreePath, 'rev-list', '--count', 'main..HEAD'],
+        // The merge queue then re-does rebase/hasCommits/changedPaths for
+        // the late-ok candidate itself.
+        ['-C', lateOkWorktreePath, 'rebase', 'main'],
+        ['-C', lateOkWorktreePath, 'rev-list', '--count', 'main..HEAD'],
+        ['-C', lateOkWorktreePath, 'diff', '--name-only', 'main..HEAD'],
+        ['-C', baseCwd, 'merge', '--ff-only', lateOkBead.id],
+        ['-C', baseCwd, 'branch', '-d', lateOkBead.id],
+        // The normal run-loop path for the main bead, unchanged.
         ['-C', worktreePath, 'rebase', 'main'],
         ['-C', worktreePath, 'rev-list', '--count', 'main..HEAD'],
         ['-C', worktreePath, 'diff', '--name-only', 'main..HEAD'],
