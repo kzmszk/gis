@@ -1,8 +1,9 @@
 import { join, resolve } from 'node:path';
 import type { Bead, BeadHandoffLocations, HumanGateRequest } from './beads.js';
-import type { GisConfig, ProfileCandidate } from './config.js';
-import { parseDurationMs } from './config.js';
+import type { GisConfig } from './config.js';
+import { ConfigError, parseDurationMs } from './config.js';
 import { startWithProfileFallback } from './profiles.js';
+import type { ProfileStartResult } from './profiles.js';
 import {
   readWorkerResult,
   workerResultProblemDetail,
@@ -209,6 +210,13 @@ async function resolveWorkerTranscriptPath(
 export function createBeadJobProcessor(
   options: BeadJobProcessorOptions,
 ): (bead: Bead) => Promise<JobOutcome> {
+  if (options.config.review && options.herdr.paneSplit === undefined) {
+    throw new ConfigError(
+      'review is enabled but the herdr adapter does not support pane.split; ' +
+        'set review = false, or use a herdr adapter/version that implements pane.split',
+    );
+  }
+
   const processBead = async (bead: Bead): Promise<JobOutcome> => {
     const agentName = herdrAgentName(bead.id);
     let worktree: BeadWorktree;
@@ -237,11 +245,10 @@ export function createBeadJobProcessor(
       return { status: 'blocked' };
     }
 
-    let started: StartedWorker | undefined;
     let workerKind: string | undefined;
-    let implementationCandidate: ProfileCandidate | undefined;
+    let selection: ProfileStartResult<StartedWorker>;
     try {
-      const selection = await startWithProfileFallback(
+      selection = await startWithProfileFallback(
         bead,
         options.config,
         async (candidate) => {
@@ -263,9 +270,6 @@ export function createBeadJobProcessor(
             error instanceof WorkerStartupError && error.phase === 'start',
         },
       );
-      started = selection.result;
-      workerKind = selection.candidate.kind;
-      implementationCandidate = selection.candidate;
     } catch (error: unknown) {
       const phase =
         error instanceof WorkerStartupError ? error.phase : 'startup';
@@ -283,19 +287,9 @@ export function createBeadJobProcessor(
       return { status: 'blocked' };
     }
 
-    if (started === undefined || workerKind === undefined) {
-      options.report(`gis: worker startup returned no worker for ${bead.id}`);
-      await options.beads.markBlocked(
-        bead.id,
-        handoff(
-          worktree,
-          defaultTranscriptPath(workerKind ?? 'unknown', worktree.path),
-        ),
-      );
-      return { status: 'blocked' };
-    }
-    const startedWorker = started;
-    const implementationKind = workerKind;
+    const startedWorker = selection.result;
+    const implementationKind = selection.candidate.kind;
+    const implementationCandidate = selection.candidate;
 
     const currentTranscriptPath = (): Promise<string> =>
       resolveWorkerTranscriptPath(
@@ -445,13 +439,6 @@ export function createBeadJobProcessor(
       }
 
       if (options.config.review) {
-        if (options.herdr.paneSplit === undefined) {
-          options.report(
-            `gis: review cannot start for ${bead.id}: herdr pane.split is unavailable`,
-          );
-          await options.beads.markBlocked(bead.id, await currentHandoff());
-          return { status: 'blocked' };
-        }
         const reviewerTranscriptPath = (
           reviewer: StartedReviewer,
         ): Promise<string> =>

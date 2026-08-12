@@ -267,6 +267,11 @@ async function requestReviewLimitDecision(
 export async function runReviewLoop(
   options: ReviewLoopOptions,
 ): Promise<ReviewLoopOutcome> {
+  // Defense for callers that invoke runReviewLoop directly. On the normal
+  // path, createBeadJobProcessor (run-worker.ts) already rejects a
+  // config.review=true + herdr without pane.split combination at
+  // construction time, before any bead is dispatched, so this branch is not
+  // reachable when running through that processor.
   if (options.herdr.paneSplit === undefined) {
     options.report(
       `gis: reviewer startup failed for ${options.bead.id}: Herdr pane.split is unavailable`,
