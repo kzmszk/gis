@@ -2,15 +2,48 @@ import { readFile, stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { createBeadsAdapter, type Bead } from './beads.js';
 import type { GisConfig } from './config.js';
-import { createHerdrAdapter, type SessionSnapshot } from './herdr.js';
-import { GitMergeAdapter, SerialMergeQueue } from './merge.js';
+import {
+  createHerdrAdapter,
+  type SessionSnapshot,
+  type SessionSnapshotResult,
+  type WorktreeRemoveOptions,
+  type WorktreeRemovedResult,
+} from './herdr.js';
+import {
+  GitMergeAdapter,
+  SerialMergeQueue,
+  type MergeBeadsSource,
+  type MergeGitSource,
+} from './merge.js';
 import { createGitAdapter, type GitWorktree } from './recovery.js';
 import { readWorkerResult } from './result.js';
+import type { VerifyCommandRunner } from './verify.js';
+
+interface LateRecoveryBeadsSource extends MergeBeadsSource {
+  listBlocked(): Promise<readonly Bead[]>;
+}
+
+interface LateRecoveryHerdrSource {
+  apiSnapshot(): Promise<SessionSnapshotResult>;
+  worktreeRemove(
+    workspaceId: string,
+    options?: WorktreeRemoveOptions,
+  ): Promise<WorktreeRemovedResult>;
+}
+
+interface LateRecoveryGitSource {
+  listWorktrees(): Promise<readonly GitWorktree[]>;
+}
 
 export interface LateRecoveryOptions {
   readonly cwd: string;
   readonly config: GisConfig;
   readonly report?: (message: string) => void;
+  readonly beads?: LateRecoveryBeadsSource;
+  readonly herdr?: LateRecoveryHerdrSource;
+  readonly worktreeGit?: LateRecoveryGitSource;
+  readonly mergeGit?: MergeGitSource;
+  readonly runVerify?: VerifyCommandRunner;
 }
 
 function isLateCommitCandidate(bead: Bead): boolean {
@@ -61,10 +94,11 @@ export async function recoverLateCompletions(
   options: LateRecoveryOptions,
 ): Promise<number> {
   const report = options.report ?? ((message: string) => console.warn(message));
-  const beads = createBeadsAdapter({ cwd: options.cwd });
-  const herdr = createHerdrAdapter();
-  const worktreeGit = createGitAdapter({ cwd: options.cwd });
-  const mergeGit = new GitMergeAdapter();
+  const beads = options.beads ?? createBeadsAdapter({ cwd: options.cwd });
+  const herdr = options.herdr ?? createHerdrAdapter();
+  const worktreeGit =
+    options.worktreeGit ?? createGitAdapter({ cwd: options.cwd });
+  const mergeGit = options.mergeGit ?? new GitMergeAdapter();
   const [blocked, snapshotResult, worktrees] = await Promise.all([
     beads.listBlocked(),
     herdr.apiSnapshot(),
@@ -77,6 +111,7 @@ export async function recoverLateCompletions(
     verifyTimeout: options.config.verify_timeout,
     beads,
     git: mergeGit,
+    runVerify: options.runVerify,
   });
   let merged = 0;
 
