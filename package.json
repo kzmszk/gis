@@ -12,13 +12,13 @@
   },
   "scripts": {
     "build": "tsc && chmod +x dist/cli.js",
-    "check": "pnpm run format:check && pnpm run lint && pnpm run typecheck && pnpm test && pnpm run slop:report",
+    "check": "pnpm run format:check && pnpm run lint && pnpm run typecheck && pnpm test && node dist/cli.js slop --report",
     "format": "oxfmt .",
     "format:check": "oxfmt --check .",
     "lint": "oxlint . --deny-warnings",
     "lint:fix": "oxlint . --fix --deny-warnings",
-    "slop:report": "node dist/cli.js slop --report",
-    "slop:verify": "node dist/cli.js slop",
+    "slop:report": "pnpm run build && node dist/cli.js slop --report",
+    "slop:verify": "pnpm run build && node dist/cli.js slop",
     "prepare": "husky",
     "test": "pnpm run build && node --test",
     "typecheck": "tsc --noEmit"

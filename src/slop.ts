@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
-import { readdir, readFile, stat } from 'node:fs/promises';
-import { join, relative } from 'node:path';
+import { readFile, stat } from 'node:fs/promises';
+import { join } from 'node:path';
 import { promisify } from 'node:util';
 import ts from 'typescript';
 
@@ -29,24 +29,31 @@ export interface SlopComparison {
 
 export const SLOP_REPORT_PREFIX = 'GIS_SLOP_REPORT=';
 
+function commentFreeLines(source: string): string[] {
+  const scanner = ts.createScanner(
+    ts.ScriptTarget.Latest,
+    false,
+    ts.LanguageVariant.Standard,
+    source,
+  );
+  let result = '';
+  for (
+    let kind = scanner.scan();
+    kind !== ts.SyntaxKind.EndOfFileToken;
+    kind = scanner.scan()
+  ) {
+    const text = scanner.getTokenText();
+    result +=
+      kind === ts.SyntaxKind.SingleLineCommentTrivia ||
+      kind === ts.SyntaxKind.MultiLineCommentTrivia
+        ? text.replace(/[^\r\n]/g, ' ')
+        : text;
+  }
+  return result.split(/\r?\n/);
+}
+
 function sourceLines(source: string): string[] {
-  let inBlockComment = false;
-  return source.split(/\r?\n/).filter((line) => {
-    const trimmed = line.trim();
-    if (inBlockComment) {
-      if (trimmed.includes('*/')) inBlockComment = false;
-      return false;
-    }
-    if (trimmed.startsWith('/*')) {
-      if (!trimmed.includes('*/')) inBlockComment = true;
-      return false;
-    }
-    return (
-      trimmed.length > 0 &&
-      !trimmed.startsWith('//') &&
-      !trimmed.startsWith('*')
-    );
-  });
+  return commentFreeLines(source).filter((line) => line.trim().length > 0);
 }
 
 function duplicateLineCount(sources: ReadonlyMap<string, string>): number {
@@ -84,24 +91,8 @@ function duplicateLineCount(sources: ReadonlyMap<string, string>): number {
 
 function sourceLineNumbers(source: string): Set<number> {
   const result = new Set<number>();
-  let inBlockComment = false;
-  for (const [index, line] of source.split(/\r?\n/).entries()) {
-    const trimmed = line.trim();
-    if (inBlockComment) {
-      if (trimmed.includes('*/')) inBlockComment = false;
-      continue;
-    }
-    if (trimmed.startsWith('/*')) {
-      if (!trimmed.includes('*/')) inBlockComment = true;
-      continue;
-    }
-    if (
-      trimmed.length > 0 &&
-      !trimmed.startsWith('//') &&
-      !trimmed.startsWith('*')
-    ) {
-      result.add(index);
-    }
+  for (const [index, line] of commentFreeLines(source).entries()) {
+    if (line.trim().length > 0) result.add(index);
   }
   return result;
 }
@@ -235,35 +226,23 @@ export function serializeSlopReport(comparison: SlopComparison): string {
   return `${SLOP_REPORT_PREFIX}${JSON.stringify(comparison)}`;
 }
 
-async function walkTypeScript(
-  root: string,
-  directory = root,
-): Promise<string[]> {
-  const entries = await readdir(directory, { withFileTypes: true });
-  const paths: string[] = [];
-  for (const entry of entries) {
-    const path = join(directory, entry.name);
-    if (entry.isDirectory()) paths.push(...(await walkTypeScript(root, path)));
-    else if (
-      entry.isFile() &&
-      entry.name.endsWith('.ts') &&
-      !entry.name.endsWith('.d.ts')
-    )
-      paths.push(relative(root, path));
-  }
-  return paths;
+function typeScriptPaths(output: string): string[] {
+  return output
+    .split('\0')
+    .filter((path) => path.endsWith('.ts') && !path.endsWith('.d.ts'));
 }
 
 async function baseTypeScriptPaths(
   cwd: string,
   ref: string,
 ): Promise<string[]> {
-  const paths = (
-    await git(cwd, ['ls-tree', '-r', '--name-only', ref, '--', 'src'])
-  )
-    .split('\n')
-    .filter((path) => path.endsWith('.ts') && !path.endsWith('.d.ts'));
-  return paths;
+  return typeScriptPaths(
+    await git(cwd, ['ls-tree', '-r', '-z', '--name-only', ref, '--', 'src']),
+  );
+}
+
+async function currentTypeScriptPaths(cwd: string): Promise<string[]> {
+  return typeScriptPaths(await git(cwd, ['ls-files', '-z', '--', 'src']));
 }
 
 async function git(cwd: string, args: string[]): Promise<string> {
@@ -298,12 +277,18 @@ export async function measureWorktreeSlop(
   } catch {
     throw new Error(`gis slop requires a src directory: ${sourceRoot}`);
   }
-  const paths = await walkTypeScript(sourceRoot);
   const current = new Map<string, string>();
   const base = new Map<string, string>();
-  for (const path of paths) {
-    const repoPath = `src/${path}`;
-    current.set(repoPath, await readFile(join(cwd, repoPath), 'utf8'));
+  for (const path of await currentTypeScriptPaths(cwd)) {
+    try {
+      current.set(path, await readFile(join(cwd, path), 'utf8'));
+    } catch (error: unknown) {
+      const code =
+        error !== null && typeof error === 'object' && 'code' in error
+          ? (error as { code?: unknown }).code
+          : undefined;
+      if (code !== 'ENOENT') throw error;
+    }
   }
   for (const path of await baseTypeScriptPaths(cwd, baseRefResolved)) {
     base.set(path, await sourceAtRef(cwd, baseRefResolved, path));

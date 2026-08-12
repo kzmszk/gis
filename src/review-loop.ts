@@ -413,6 +413,10 @@ export async function runReviewLoop(
 
         round += 1;
         try {
+          const currentSlop = options.getSlopFeedback?.();
+          const slopUpdate =
+            currentSlop === lastSlopFeedback ? undefined : currentSlop;
+          lastSlopFeedback = currentSlop;
           const prompted = await promptReviewer({
             bead: options.bead,
             runPath: options.worktree.runPath,
@@ -420,16 +424,7 @@ export async function runReviewLoop(
             target: reviewer.agentName,
             round,
             implementationKind: options.implementation.kind,
-            feedback: [
-              (() => {
-                const current = options.getSlopFeedback?.();
-                const changed =
-                  current === lastSlopFeedback ? undefined : current;
-                lastSlopFeedback = current;
-                return changed;
-              })(),
-              feedback,
-            ]
+            feedback: [slopUpdate, feedback]
               .filter((value): value is string => value !== undefined)
               .join('\n\n'),
             herdr: options.herdr,

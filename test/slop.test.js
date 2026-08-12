@@ -53,6 +53,16 @@ test('does not strip URL content from string literals while matching duplicates'
   assert.equal(score.duplicateLines, 0);
 });
 
+test('ignores trailing comments without treating string content as comments', () => {
+  const score = measureSlop(
+    new Map([
+      ['first.ts', 'foo(1); // step one\nbar(2);\nbaz(3);'],
+      ['second.ts', 'foo(1); // step 1\nbar(2);\nbaz(3);'],
+    ]),
+  );
+  assert.equal(score.duplicateLines, 6);
+});
+
 test('concentrates erosion in functions above complexity ten', () => {
   const conditions = Array.from(
     { length: 10 },
@@ -119,6 +129,33 @@ test('includes files removed from the worktree in the base measurement', async (
     const comparison = await measureWorktreeSlop(root, 'main');
     assert.equal(comparison.base.loc, 3);
     assert.equal(comparison.current.loc, 0);
+  });
+});
+
+test('measures only tracked current files and retains Unicode base paths', async () => {
+  await withGitRepo(async (root) => {
+    await mkdir(join(root, 'src', 'node_modules', 'package'), {
+      recursive: true,
+    });
+    await writeFile(
+      join(root, 'src', '日本語.ts'),
+      'const a = 1;\nconst b = 2;\nconst c = 3;\n',
+    );
+    await writeFile(join(root, '.gitignore'), 'node_modules/\n*.gen.ts\n');
+    await execFileAsync('git', ['add', '.'], { cwd: root });
+    await execFileAsync('git', ['commit', '-m', 'base'], { cwd: root });
+    await writeFile(
+      join(root, 'src', 'node_modules', 'package', 'index.ts'),
+      'const ignored = 1;\nconst x = 2;\nconst y = 3;\n',
+    );
+    await writeFile(
+      join(root, 'src', 'generated.gen.ts'),
+      'const generated = 1;\nconst x = 2;\nconst y = 3;\n',
+    );
+
+    const comparison = await measureWorktreeSlop(root, 'main');
+    assert.equal(comparison.base.loc, 3);
+    assert.equal(comparison.current.loc, 3);
   });
 });
 

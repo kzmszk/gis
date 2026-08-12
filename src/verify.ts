@@ -3,7 +3,7 @@ import type { ExecException } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { Bead, BeadHandoffLocations } from './beads.js';
 import { parseDurationMs, type GisConfig } from './config.js';
-import { SLOP_REPORT_PREFIX, type SlopComparison } from './slop.js';
+import { SLOP_REPORT_PREFIX, type SlopScore } from './slop.js';
 import {
   promptWorker,
   type VerificationCycle,
@@ -21,10 +21,13 @@ export interface VerifyCommandResult {
   readonly signal?: string;
 }
 
-type SlopReport = Pick<
-  SlopComparison,
-  'base' | 'current' | 'verbosityDelta' | 'erosionDelta'
->;
+type SlopMetricScore = Pick<SlopScore, 'verbosity' | 'erosion'>;
+interface SlopReport {
+  readonly base: SlopMetricScore;
+  readonly current: SlopMetricScore;
+  readonly verbosityDelta: number;
+  readonly erosionDelta: number;
+}
 
 export type VerifyCommandRunner = (
   command: string,
