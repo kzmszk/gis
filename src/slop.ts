@@ -242,7 +242,17 @@ async function baseTypeScriptPaths(
 }
 
 async function currentTypeScriptPaths(cwd: string): Promise<string[]> {
-  return typeScriptPaths(await git(cwd, ['ls-files', '-z', '--', 'src']));
+  return typeScriptPaths(
+    await git(cwd, [
+      'ls-files',
+      '-z',
+      '--cached',
+      '--others',
+      '--exclude-standard',
+      '--',
+      'src',
+    ]),
+  );
 }
 
 async function git(cwd: string, args: string[]): Promise<string> {

@@ -132,7 +132,7 @@ test('includes files removed from the worktree in the base measurement', async (
   });
 });
 
-test('measures only tracked current files and retains Unicode base paths', async () => {
+test('includes untracked sources, ignores generated files, and retains Unicode paths', async () => {
   await withGitRepo(async (root) => {
     await mkdir(join(root, 'src', 'node_modules', 'package'), {
       recursive: true,
@@ -152,10 +152,14 @@ test('measures only tracked current files and retains Unicode base paths', async
       join(root, 'src', 'generated.gen.ts'),
       'const generated = 1;\nconst x = 2;\nconst y = 3;\n',
     );
+    await writeFile(
+      join(root, 'src', 'brand-new.ts'),
+      'const newOne = 1;\nconst newTwo = 2;\nconst newThree = 3;\nconst newFour = 4;\n',
+    );
 
     const comparison = await measureWorktreeSlop(root, 'main');
     assert.equal(comparison.base.loc, 3);
-    assert.equal(comparison.current.loc, 3);
+    assert.equal(comparison.current.loc, 7);
   });
 });
 
