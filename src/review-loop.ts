@@ -56,6 +56,8 @@ export interface ReviewLoopOptions {
   readonly verifyImplementation: (
     cycle: ReviewVerificationCycle,
   ) => Promise<'verified' | 'blocked'>;
+  /** Informational quality metrics from the most recent successful verification. */
+  readonly getSlopFeedback?: () => string | undefined;
   readonly onHumanGate: (gate: Bead, locations: BeadHandoffLocations) => void;
   readonly report: (message: string) => void;
 }
@@ -285,6 +287,7 @@ export async function runReviewLoop(
       implementationCandidate: options.implementation.candidate,
       config: options.config,
       herdr: options.herdr,
+      reviewFeedback: options.getSlopFeedback?.(),
     });
   } catch (error: unknown) {
     options.report(
@@ -302,6 +305,7 @@ export async function runReviewLoop(
 
   let round = 1;
   let prompt = reviewer.selection.result.prompt;
+  let lastSlopFeedback = options.getSlopFeedback?.();
 
   while (true) {
     let reviewerStatus: 'done' | 'blocked';
@@ -409,6 +413,10 @@ export async function runReviewLoop(
 
         round += 1;
         try {
+          const currentSlop = options.getSlopFeedback?.();
+          const slopUpdate =
+            currentSlop === lastSlopFeedback ? undefined : currentSlop;
+          lastSlopFeedback = currentSlop;
           const prompted = await promptReviewer({
             bead: options.bead,
             runPath: options.worktree.runPath,
@@ -416,7 +424,9 @@ export async function runReviewLoop(
             target: reviewer.agentName,
             round,
             implementationKind: options.implementation.kind,
-            feedback,
+            feedback: [slopUpdate, feedback]
+              .filter((value): value is string => value !== undefined)
+              .join('\n\n'),
             herdr: options.herdr,
           });
           prompt = prompted.prompt;

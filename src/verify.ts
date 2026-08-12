@@ -3,6 +3,7 @@ import type { ExecException } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { Bead, BeadHandoffLocations } from './beads.js';
 import { parseDurationMs, type GisConfig } from './config.js';
+import { SLOP_REPORT_PREFIX, type SlopScore } from './slop.js';
 import {
   promptWorker,
   type VerificationCycle,
@@ -18,6 +19,14 @@ export interface VerifyCommandResult {
   readonly stderr?: string;
   readonly exitCode?: number;
   readonly signal?: string;
+}
+
+type SlopMetricScore = Pick<SlopScore, 'verbosity' | 'erosion'>;
+interface SlopReport {
+  readonly base: SlopMetricScore;
+  readonly current: SlopMetricScore;
+  readonly verbosityDelta: number;
+  readonly erosionDelta: number;
 }
 
 export type VerifyCommandRunner = (
@@ -87,6 +96,60 @@ function text(value: unknown): string {
     : value instanceof Buffer
       ? value.toString('utf8')
       : '';
+}
+
+function isSlopReport(value: unknown): value is SlopReport {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    return false;
+  }
+  const report = value as Record<string, unknown>;
+  const base = report.base as Record<string, unknown> | undefined;
+  const current = report.current as Record<string, unknown> | undefined;
+  return (
+    typeof base?.verbosity === 'number' &&
+    typeof base.erosion === 'number' &&
+    typeof current?.verbosity === 'number' &&
+    typeof current.erosion === 'number' &&
+    typeof report.verbosityDelta === 'number' &&
+    typeof report.erosionDelta === 'number'
+  );
+}
+
+function readSlopReport(result: VerifyCommandResult): SlopReport | undefined {
+  const line = result.stdout
+    ?.split(/\r?\n/)
+    .find((value) => value.startsWith(SLOP_REPORT_PREFIX));
+  if (line === undefined) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(line.slice(SLOP_REPORT_PREFIX.length));
+    return isSlopReport(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Whether either quality metric worsened relative to the base snapshot. */
+export function slopWorsened(result: VerifyCommandResult): boolean {
+  const report = readSlopReport(result);
+  return (
+    report !== undefined &&
+    (report.verbosityDelta > 0 || report.erosionDelta > 0)
+  );
+}
+
+/** Extract the optional report emitted by `gis slop --report` from verify output. */
+export function slopFeedback(result: VerifyCommandResult): string | undefined {
+  const parsed = readSlopReport(result);
+  if (parsed === undefined) return undefined;
+  const points = (value: number) =>
+    `${value >= 0 ? '+' : ''}${(value * 100).toFixed(2)}pt`;
+  return [
+    'SCBench-inspired quality report (informational; does not block this task). Lower is better for both metrics:',
+    '- verbosity: duplicate normalized source-line blocks / source lines.',
+    '- structural erosion: complexity mass concentrated in functions with CC > 10.',
+    `- verbosity: ${(parsed.current.verbosity * 100).toFixed(2)}% (${points(parsed.verbosityDelta)})`,
+    `- structural erosion: ${(parsed.current.erosion * 100).toFixed(2)}% (${points(parsed.erosionDelta)})`,
+  ].join('\n');
 }
 
 function exitCode(

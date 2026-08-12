@@ -17,6 +17,19 @@ import { test } from 'node:test';
 import { promisify } from 'node:util';
 import { pathToFileURL } from 'node:url';
 import { herdrAgentName } from '../dist/worker.js';
+import { parseSlopOptions } from '../dist/cli.js';
+
+test('parses slop base overrides and rejects invalid thresholds before Git access', () => {
+  assert.deepEqual(parseSlopOptions(['--base', 'develop', '--report']), {
+    base: 'develop',
+    maxDelta: 0.02,
+    reportOnly: true,
+  });
+  assert.throws(
+    () => parseSlopOptions(['--max-delta', 'not-a-number']),
+    /slop max delta must be a non-negative number/,
+  );
+});
 
 const execFileAsync = promisify(execFile);
 

@@ -31,7 +31,12 @@ import type { ReviewHerdrSource, StartedReviewer } from './review.js';
 import { runReviewLoop } from './review-loop.js';
 import type { AgentInfo, AgentSessionInfo } from './herdr.js';
 import type { MergeQueueItem, MergeResult } from './merge.js';
-import type { VerifyLoopOptions, VerifyLoopResult } from './verify.js';
+import {
+  slopFeedback,
+  slopWorsened,
+  type VerifyLoopOptions,
+  type VerifyLoopResult,
+} from './verify.js';
 import { delay, errorMessage } from './internal.js';
 
 /** The terminal state recorded by a job in the foreground orchestration loop. */
@@ -388,6 +393,7 @@ export function createBeadJobProcessor(
       }
     }
 
+    let latestSlopFeedback: string | undefined;
     const verifyImplementation = async (
       verificationCycle: VerificationCycle = { kind: 'initial' },
     ): Promise<'verified' | 'blocked'> => {
@@ -409,6 +415,27 @@ export function createBeadJobProcessor(
         },
         verificationCycle,
       });
+      if (verification.status === 'verified') {
+        latestSlopFeedback = slopFeedback(verification.result);
+        if (
+          latestSlopFeedback !== undefined &&
+          slopWorsened(verification.result)
+        ) {
+          options.report(
+            `gis: ${bead.id} ${latestSlopFeedback.replaceAll('\n', ' ')}`,
+          );
+          try {
+            await options.herdr.agentPrompt(
+              agentName,
+              `The latest verification passed, but the quality metrics worsened. This is informational only; consider it if you are asked to make further changes in this task.\n\n${latestSlopFeedback}`,
+            );
+          } catch (error: unknown) {
+            options.report(
+              `gis: could not deliver informational slop report to ${bead.id}: ${errorMessage(error)}`,
+            );
+          }
+        }
+      }
       return verification.status;
     };
 
@@ -452,6 +479,7 @@ export function createBeadJobProcessor(
           implementationHandoff: currentHandoff,
           reviewerTranscriptPath,
           verifyImplementation,
+          getSlopFeedback: () => latestSlopFeedback,
           onHumanGate: options.onHumanGate,
           report: options.report,
         });

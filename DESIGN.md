@@ -176,6 +176,16 @@ verify は無料（数十秒の CPU）、レビューは有料（サブスク枠
 副次的な効果として、verify 失敗とレビュー失敗が
 **同じ「実装ペインに指摘を投げ直す」機構の2つの入口**に統一され、実装が1本で済む。
 
+### SCBench-inspired slop quality gate
+
+`gis slop` は worktree の `src/**/*.ts` を base branch との merge-base と比較し、JSON を出力する。
+冗長性は正規化した3行ブロックの重複SLOC率、structural erosion は
+`cyclomatic complexity * sqrt(function SLOC)` のうち複雑度10超の関数が占める割合である。
+どちらも低いほどよい。`gis slop --report` は計測のみ、既定の `gis slop` はいずれかが
+0.02超悪化すると失敗する。プロジェクトの通常 verify は report-only の `pnpm slop:report` を
+使い、成功時の数値と差分を実装者・レビュアーへ情報として渡す。しきい値を校正後、
+`pnpm slop:verify` に切り替えればゲート化できる。
+
 ### マージ時に rebase してから verify を再実行する
 
 個別に通ったブランチ同士が合流すると壊れる、というのが並列開発の主要な失敗モードである。
