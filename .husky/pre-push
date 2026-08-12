@@ -1,0 +1,36 @@
+# Chain the beads shim. Git honours core.hooksPath (.husky/_), so the copy
+# beads installs into .git/hooks is never reached; run it from here instead.
+# Skip silently when the shim is absent — a sparse checkout or a repo that
+# has dropped beads must still be able to push. stdin carries the refs
+# being pushed and is inherited as-is.
+hook="$(git rev-parse --show-toplevel)/.beads/hooks/pre-push"
+[ -x "$hook" ] || exit 0
+"$hook" "$@"
+
+# The shim does not sync the issue database — it only handles backup and
+# export, both of which it skips under a git hook. Pushing the Dolt data to
+# refs/dolt/data is a separate command that nothing else calls, and without
+# it the bead state never leaves this machine.
+command -v bd >/dev/null 2>&1 || exit 0
+
+# Only for the remote beads actually syncs against, so `git push fork`
+# does not quietly push issues to origin.
+target=$(git remote get-url "$1" 2>/dev/null || echo "$1")
+origin=$(git remote get-url origin 2>/dev/null || echo)
+[ -n "$origin" ] && [ "$target" = "$origin" ] || exit 0
+
+# Bounded: a black-holed network must not hang the push. Warn rather than
+# fail — being offline should not block a push, and the next one retries.
+if command -v timeout >/dev/null 2>&1; then
+  out=$(timeout 60 bd dolt push 2>&1); code=$?
+elif command -v gtimeout >/dev/null 2>&1; then
+  out=$(gtimeout 60 bd dolt push 2>&1); code=$?
+else
+  out=$(bd dolt push 2>&1); code=$?
+fi
+if [ $code -ne 0 ]; then
+  echo >&2 "beads: could not sync the issue database to $1:"
+  echo >&2 "$out" | sed 's/^/  /'
+  echo >&2 "beads: the bead state stays local until 'bd dolt push' succeeds."
+fi
+exit 0

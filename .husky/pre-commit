@@ -1,2 +1,10 @@
 pnpm exec lint-staged
 pnpm run typecheck
+
+# Beads last: a commit rejected by the checks above should not leave the
+# issue database's side effects behind. Nothing beads exports here is
+# staged anyway — .beads/issues.jsonl is gitignored and export.git-add
+# defaults to false.
+hook="$(git rev-parse --show-toplevel)/.beads/hooks/pre-commit"
+[ -x "$hook" ] || exit 0
+exec "$hook" "$@"
