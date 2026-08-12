@@ -1,0 +1,7 @@
+# Chain the beads shim. Git honours core.hooksPath (.husky/_), so the copy
+# beads installs into .git/hooks is never reached; run it from here instead.
+# Skip silently when the shim is absent — a sparse checkout or a repo that
+# has dropped beads must still be able to commit.
+hook="$(git rev-parse --show-toplevel)/.beads/hooks/post-merge"
+[ -x "$hook" ] || exit 0
+exec "$hook" "$@"
