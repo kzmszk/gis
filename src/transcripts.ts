@@ -91,15 +91,30 @@ function isMissingPath(error: unknown): boolean {
   );
 }
 
-async function existingFile(path: string): Promise<string | undefined> {
+/**
+ * Run an fs operation, treating a missing path as `fallback` instead of an
+ * error. A live runner may rotate or remove a transcript while it is
+ * indexed, so callers across this module tolerate that race the same way.
+ */
+async function withMissingPathFallback<T>(
+  operation: () => Promise<T>,
+  fallback: T,
+): Promise<T> {
   try {
-    return (await stat(path)).isFile() ? path : undefined;
+    return await operation();
   } catch (error: unknown) {
     if (isMissingPath(error)) {
-      return undefined;
+      return fallback;
     }
     throw error;
   }
+}
+
+async function existingFile(path: string): Promise<string | undefined> {
+  return withMissingPathFallback(
+    async () => ((await stat(path)).isFile() ? path : undefined),
+    undefined,
+  );
 }
 
 /**
@@ -121,15 +136,10 @@ async function jsonlFiles(
   directory: string,
   recursive: boolean,
 ): Promise<string[]> {
-  let entries;
-  try {
-    entries = await readdir(directory, { withFileTypes: true });
-  } catch (error: unknown) {
-    if (isMissingPath(error)) {
-      return [];
-    }
-    throw error;
-  }
+  const entries = await withMissingPathFallback(
+    () => readdir(directory, { withFileTypes: true }),
+    [],
+  );
 
   const files: string[] = [];
   for (const entry of entries) {
@@ -153,16 +163,9 @@ async function timestampedFiles(
 ): Promise<TimestampedPath[]> {
   const files: TimestampedPath[] = [];
   for (const path of paths) {
-    try {
-      const info = await stat(path);
-      if (info.isFile()) {
-        files.push({ path, mtimeMs: info.mtimeMs });
-      }
-    } catch (error: unknown) {
-      // A live runner may rotate or remove a transcript while it is indexed.
-      if (!isMissingPath(error)) {
-        throw error;
-      }
+    const info = await withMissingPathFallback(() => stat(path), undefined);
+    if (info?.isFile()) {
+      files.push({ path, mtimeMs: info.mtimeMs });
     }
   }
   return files;
@@ -215,21 +218,20 @@ export async function resolveClaudeTranscript(
   return (await listClaudeTranscripts(cwd, options))[0];
 }
 
+/** Narrow a JSONL record value to a plain, non-array object. */
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function nonEmptyString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
 function sessionCwdFromRecord(value: unknown): string | undefined {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-    return undefined;
-  }
-  const record = value as Record<string, unknown>;
-  const payload = record.payload;
-  if (
-    payload === null ||
-    typeof payload !== 'object' ||
-    Array.isArray(payload)
-  ) {
-    return undefined;
-  }
-  const cwd = (payload as Record<string, unknown>).cwd;
-  return typeof cwd === 'string' && cwd.length > 0 ? cwd : undefined;
+  const payload = asRecord(asRecord(value)?.payload);
+  return nonEmptyString(payload?.cwd);
 }
 
 interface CodexSessionMetadata {
@@ -240,38 +242,31 @@ interface CodexSessionMetadata {
 function codexMetadataFromRecord(
   value: unknown,
 ): CodexSessionMetadata | undefined {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+  const record = asRecord(value);
+  if (record === undefined || record.type !== 'session_meta') {
     return undefined;
   }
-  const record = value as Record<string, unknown>;
-  if (record.type !== 'session_meta') {
+  const payload = asRecord(record.payload);
+  if (payload === undefined) {
     return undefined;
   }
-  const payload = record.payload;
-  if (
-    payload === null ||
-    typeof payload !== 'object' ||
-    Array.isArray(payload)
-  ) {
-    return undefined;
-  }
-  const metadata = payload as Record<string, unknown>;
   return {
-    id:
-      typeof metadata.id === 'string' && metadata.id.length > 0
-        ? metadata.id
-        : undefined,
-    cwd:
-      typeof metadata.cwd === 'string' && metadata.cwd.length > 0
-        ? metadata.cwd
-        : undefined,
+    id: nonEmptyString(payload.id),
+    cwd: nonEmptyString(payload.cwd),
   };
 }
 
-async function readCodexSessionMetadata(
+/**
+ * Read up to `maxLines` JSONL records from `path`, returning the first
+ * value `extract` resolves to a defined result for. A malformed line does
+ * not make the rest of the session unusable, so it is skipped rather than
+ * treated as a failure.
+ */
+async function firstMatchingRecord<T>(
   path: string,
   maxLines: number,
-): Promise<CodexSessionMetadata | undefined> {
+  extract: (value: unknown) => T | undefined,
+): Promise<T | undefined> {
   const input = createReadStream(path, { encoding: 'utf8' });
   const lines = createInterface({ input, crlfDelay: Infinity });
   let lineCount = 0;
@@ -280,39 +275,9 @@ async function readCodexSessionMetadata(
     for await (const line of lines) {
       lineCount += 1;
       try {
-        const metadata = codexMetadataFromRecord(JSON.parse(line) as unknown);
-        if (metadata !== undefined) {
-          return metadata;
-        }
-      } catch {
-        // A malformed record does not make the rest of the session unusable.
-      }
-      if (lineCount >= maxLines) {
-        break;
-      }
-    }
-    return undefined;
-  } finally {
-    lines.close();
-    input.destroy();
-  }
-}
-
-async function readSessionCwd(
-  path: string,
-  maxLines: number,
-): Promise<string | undefined> {
-  const input = createReadStream(path, { encoding: 'utf8' });
-  const lines = createInterface({ input, crlfDelay: Infinity });
-  let lineCount = 0;
-
-  try {
-    for await (const line of lines) {
-      lineCount += 1;
-      try {
-        const cwd = sessionCwdFromRecord(JSON.parse(line) as unknown);
-        if (cwd !== undefined) {
-          return cwd;
+        const match = extract(JSON.parse(line) as unknown);
+        if (match !== undefined) {
+          return match;
         }
       } catch {
         // A malformed record does not make the rest of the session unusable.
@@ -369,18 +334,15 @@ async function resolveCodexSessionId(
 
   const matches: string[] = [];
   for (const candidate of candidates) {
-    let metadata: CodexSessionMetadata | undefined;
-    try {
-      metadata = await readCodexSessionMetadata(
-        candidate,
-        metadataLineLimit(options),
-      );
-    } catch (error: unknown) {
-      if (!isMissingPath(error)) {
-        throw error;
-      }
-      continue;
-    }
+    const metadata = await withMissingPathFallback(
+      () =>
+        firstMatchingRecord(
+          candidate,
+          metadataLineLimit(options),
+          codexMetadataFromRecord,
+        ),
+      undefined,
+    );
     if (
       metadata?.id === sessionId &&
       metadata.cwd !== undefined &&
@@ -433,15 +395,10 @@ async function matchingCodexFiles(
   const matches: string[] = [];
 
   for (const candidate of candidates) {
-    let sessionCwd: string | undefined;
-    try {
-      sessionCwd = await readSessionCwd(candidate, maxLines);
-    } catch (error: unknown) {
-      if (!isMissingPath(error)) {
-        throw error;
-      }
-      continue;
-    }
+    const sessionCwd = await withMissingPathFallback(
+      () => firstMatchingRecord(candidate, maxLines, sessionCwdFromRecord),
+      undefined,
+    );
     if (sessionCwd !== undefined && absoluteCwd(sessionCwd) === expectedCwd) {
       matches.push(candidate);
     }

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { test } from 'node:test';
@@ -13,6 +13,9 @@ import {
   resolveTranscriptIndex,
   resolveTranscriptPath,
 } from '../dist/transcripts.js';
+
+// Permission-denial tests rely on mode bits that root ignores.
+const isRoot = process.getuid?.() === 0;
 
 async function withTranscriptRoots(callback) {
   const home = await mkdtemp(join(tmpdir(), 'gis-transcripts-'));
@@ -305,6 +308,322 @@ test('returns no index when the official transcript roots have no matching file'
         options,
       ),
       undefined,
+    );
+  });
+});
+
+test('rejects empty or non-string identifiers', async () => {
+  await withTranscriptRoots(async (home, options) => {
+    assert.throws(() => claudeProjectSlug(''), TypeError);
+    assert.throws(() => claudeProjectSlug('   '), TypeError);
+    assert.throws(() => claudeProjectSlug(42), TypeError);
+    await assert.rejects(
+      resolveBeadTranscriptIndex('', join(home, 'wt'), 'claude', options),
+      TypeError,
+    );
+  });
+});
+
+test('rejects an invalid maxCodexMetadataLines override', async () => {
+  await withTranscriptRoots(async (_home, options) => {
+    const cwd = '/repo/.worktrees/gis-vst.12';
+    await assert.rejects(
+      listCodexTranscripts(cwd, { ...options, maxCodexMetadataLines: 0 }),
+      RangeError,
+    );
+    await assert.rejects(
+      listCodexTranscripts(cwd, { ...options, maxCodexMetadataLines: 1.5 }),
+      RangeError,
+    );
+  });
+});
+
+test('rejects an invalid modifiedAfterMs override', async () => {
+  await withTranscriptRoots(async (_home, options) => {
+    const cwd = '/repo/.worktrees/gis-vst.12';
+    await assert.rejects(
+      listClaudeTranscripts(cwd, { ...options, modifiedAfterMs: -1 }),
+      RangeError,
+    );
+    await assert.rejects(
+      listClaudeTranscripts(cwd, { ...options, modifiedAfterMs: NaN }),
+      RangeError,
+    );
+  });
+});
+
+test('returns undefined for a path session reference that does not exist', async () => {
+  await withTranscriptRoots(async (home, options) => {
+    const cwd = '/repo/.worktrees/gis-vst.12';
+    const missing = join(home, 'custom', 'missing.jsonl');
+
+    assert.equal(
+      await resolveAgentSessionTranscript(
+        { source: 'pi', agent: 'pi', kind: 'path', value: missing },
+        cwd,
+        options,
+      ),
+      undefined,
+    );
+  });
+});
+
+test('propagates a non-missing-path error while checking a path session reference', async (t) => {
+  if (isRoot) {
+    t.skip('permission bits do not block root');
+    return;
+  }
+  await withTranscriptRoots(async (home, options) => {
+    const cwd = '/repo/.worktrees/gis-vst.12';
+    const blockedDir = join(home, 'blocked');
+    await mkdir(blockedDir, { recursive: true });
+    await writeFile(join(blockedDir, 'session.jsonl'), '{}\n', 'utf8');
+    await chmod(blockedDir, 0o600);
+    try {
+      await assert.rejects(
+        resolveAgentSessionTranscript(
+          {
+            source: 'pi',
+            agent: 'pi',
+            kind: 'path',
+            value: join(blockedDir, 'session.jsonl'),
+          },
+          cwd,
+          options,
+        ),
+        (error) => error.code === 'EACCES',
+      );
+    } finally {
+      await chmod(blockedDir, 0o700);
+    }
+  });
+});
+
+test('propagates a non-missing-path error while listing Claude transcripts', async (t) => {
+  if (isRoot) {
+    t.skip('permission bits do not block root');
+    return;
+  }
+  await withTranscriptRoots(async (_home, options) => {
+    const cwd = '/repo/.worktrees/gis-vst.12';
+    const directory = claudeProjectDirectory(cwd, options);
+    await mkdir(directory, { recursive: true });
+    await writeFile(join(directory, 'session.jsonl'), '{}\n', 'utf8');
+    await chmod(directory, 0o600);
+    try {
+      await assert.rejects(
+        listClaudeTranscripts(cwd, options),
+        (error) => error.code === 'EACCES',
+      );
+    } finally {
+      await chmod(directory, 0o700);
+    }
+  });
+});
+
+test('propagates a non-missing-path error while matching Codex sessions', async (t) => {
+  if (isRoot) {
+    t.skip('permission bits do not block root');
+    return;
+  }
+  await withTranscriptRoots(async (home, options) => {
+    const cwd = '/repo/.worktrees/gis-vst.12';
+    const directory = join(home, '.codex', 'sessions', '2026', '08', '10');
+    await mkdir(directory, { recursive: true });
+    const transcript = join(directory, 'rollout.jsonl');
+    await writeFile(
+      transcript,
+      JSON.stringify({ type: 'session_meta', payload: { cwd } }) + '\n',
+      'utf8',
+    );
+    // Deny read on the file itself (not its directory) so `stat` -- and thus
+    // `timestampedFiles` -- still succeeds; only the later content read
+    // inside `matchingCodexFiles` should fail.
+    await chmod(transcript, 0o000);
+    try {
+      await assert.rejects(
+        listCodexTranscripts(cwd, options),
+        (error) => error.code === 'EACCES',
+      );
+    } finally {
+      await chmod(transcript, 0o700);
+    }
+  });
+});
+
+test('skips malformed Codex records when locating a matching cwd or session id', async () => {
+  await withTranscriptRoots(async (home, options) => {
+    const cwd = '/repo/.worktrees/gis-vst.12';
+    const directory = join(home, '.codex', 'sessions', '2026', '08', '10');
+    await mkdir(directory, { recursive: true });
+    const lines = [
+      'null',
+      '{}',
+      JSON.stringify({ type: 'session_meta' }),
+      'not-json-at-all',
+      JSON.stringify({
+        type: 'session_meta',
+        payload: { id: 'sess-x', cwd },
+      }),
+    ];
+    const file = join(directory, 'rollout-sess-x.jsonl');
+    await writeFile(file, lines.join('\n') + '\n', 'utf8');
+
+    const wideOptions = { ...options, maxCodexMetadataLines: 5 };
+    assert.deepEqual(await listCodexTranscripts(cwd, wideOptions), [file]);
+    assert.equal(
+      await resolveAgentSessionTranscript(
+        {
+          source: 'codex-sessions',
+          agent: 'codex',
+          kind: 'id',
+          value: 'sess-x',
+        },
+        cwd,
+        wideOptions,
+      ),
+      file,
+    );
+  });
+});
+
+test('treats an empty Codex session cwd as absent rather than a match', async () => {
+  await withTranscriptRoots(async (home, options) => {
+    const cwd = '/repo/.worktrees/gis-vst.12';
+    const directory = join(home, '.codex', 'sessions', '2026', '08', '10');
+    await mkdir(directory, { recursive: true });
+    const file = join(directory, 'rollout.jsonl');
+    // The empty-cwd record must be skipped as if it had no cwd at all --
+    // if it were treated as a real match, `absoluteCwd('')` would throw
+    // instead of the scan moving on to the record that actually matches.
+    await writeFile(
+      file,
+      [
+        JSON.stringify({ type: 'session_meta', payload: { cwd: '' } }),
+        JSON.stringify({ type: 'session_meta', payload: { cwd } }),
+      ].join('\n') + '\n',
+      'utf8',
+    );
+
+    assert.deepEqual(await listCodexTranscripts(cwd, options), [file]);
+  });
+});
+
+test('gives up once the metadata line limit is reached without a match', async () => {
+  await withTranscriptRoots(async (home, options) => {
+    const cwd = '/repo/.worktrees/gis-vst.12';
+    const directory = join(home, '.codex', 'sessions', '2026', '08', '10');
+    await mkdir(directory, { recursive: true });
+    // Neither a `session_meta` record nor a payload with a `cwd`, so both
+    // extractors must keep scanning through these.
+    const nonMatching = JSON.stringify({ payload: { note: 'irrelevant' } });
+    // Matches both extractors (cwd for the listing, id for the lookup) --
+    // placed on line 5, past the `maxCodexMetadataLines` (4) cutoff in
+    // `options`, so a correct scan must give up just before reaching it.
+    // If the cutoff were off-by-one or skipped entirely, this record would
+    // be found and the assertions below would fail.
+    const wouldMatch = JSON.stringify({
+      type: 'session_meta',
+      payload: { id: 'sess-y', cwd },
+    });
+    const file = join(directory, 'rollout-sess-y.jsonl');
+    await writeFile(
+      file,
+      [nonMatching, nonMatching, nonMatching, nonMatching, wouldMatch].join(
+        '\n',
+      ) + '\n',
+      'utf8',
+    );
+
+    assert.deepEqual(await listCodexTranscripts(cwd, options), []);
+    assert.equal(
+      await resolveAgentSessionTranscript(
+        {
+          source: 'codex-sessions',
+          agent: 'codex',
+          kind: 'id',
+          value: 'sess-y',
+        },
+        cwd,
+        options,
+      ),
+      undefined,
+    );
+  });
+});
+
+test('resolves ~ and ~/ path session references against the home directory', async () => {
+  await withTranscriptRoots(async (home, options) => {
+    const cwd = join(home, 'worktree');
+    await mkdir(cwd, { recursive: true });
+    // A decoy at the literal, non-expanded path `${cwd}/~`. If `~` were
+    // ever treated as an ordinary relative path segment instead of being
+    // expanded to the home directory, this decoy file would be resolved
+    // instead of the (non-file) home directory, making the two branches
+    // distinguishable.
+    await writeFile(join(cwd, '~'), '{}\n', 'utf8');
+
+    assert.equal(
+      await resolveAgentSessionTranscript(
+        { source: 'pi', agent: 'pi', kind: 'path', value: '~' },
+        cwd,
+        options,
+      ),
+      undefined,
+    );
+
+    await mkdir(join(home, 'custom'), { recursive: true });
+    const transcript = join(home, 'custom', 'session.jsonl');
+    await writeFile(transcript, '{}\n', 'utf8');
+    assert.equal(
+      await resolveAgentSessionTranscript(
+        {
+          source: 'pi',
+          agent: 'pi',
+          kind: 'path',
+          value: '~/custom/session.jsonl',
+        },
+        cwd,
+        options,
+      ),
+      transcript,
+    );
+  });
+});
+
+test('rejects an agent session reference of an unsupported kind', async () => {
+  await withTranscriptRoots(async (_home, options) => {
+    const cwd = '/repo/.worktrees/gis-vst.12';
+    await assert.rejects(
+      resolveAgentSessionTranscript(
+        { source: 'pi', agent: 'pi', kind: 'hash', value: 'abc' },
+        cwd,
+        options,
+      ),
+      TypeError,
+    );
+  });
+});
+
+test('returns undefined for an id session reference from an unsupported agent', async () => {
+  await withTranscriptRoots(async (_home, options) => {
+    const cwd = '/repo/.worktrees/gis-vst.12';
+    assert.equal(
+      await resolveAgentSessionTranscript(
+        { source: 'pi', agent: 'pi', kind: 'id', value: 'abc' },
+        cwd,
+        options,
+      ),
+      undefined,
+    );
+  });
+});
+
+test('rejects an unsupported transcript kind', async () => {
+  await withTranscriptRoots(async (_home, options) => {
+    await assert.rejects(
+      resolveTranscriptPath('/repo/.worktrees/gis-vst.12', 'bogus', options),
+      TypeError,
     );
   });
 });
