@@ -13,7 +13,11 @@ import {
   type ReviewResultState,
   type StartedReviewer,
 } from './review.js';
-import { promptWorker, type ReviewVerificationCycle } from './worker.js';
+import {
+  promptWorker,
+  type ReviewVerificationCycle,
+  type WorkerPrompt,
+} from './worker.js';
 import {
   readWorkerResult,
   workerResultProblemDetail,
@@ -107,14 +111,18 @@ function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-async function waitForImplementationResult(
-  path: string,
-  runId: string,
+/**
+ * Poll `read` until it reports a state other than "not written yet"
+ * (missing/stale), or until `timeout` elapses. On timeout the last
+ * missing/stale state is returned as-is so callers can report it.
+ */
+async function pollUntilTerminal<T extends { readonly kind: string }>(
+  read: () => Promise<T>,
   timeout: string,
-): Promise<ResultFileState> {
+): Promise<T> {
   const deadline = Date.now() + parseDurationMs(timeout, 'blocked_timeout');
   while (true) {
-    const result = await readWorkerResult(path, runId);
+    const result = await read();
     if (result.kind !== 'missing' && result.kind !== 'stale') {
       return result;
     }
@@ -125,6 +133,22 @@ async function waitForImplementationResult(
     }
     await delay(Math.min(250, remaining));
   }
+}
+
+function waitForImplementationResult(
+  path: string,
+  runId: string,
+  timeout: string,
+): Promise<ResultFileState> {
+  return pollUntilTerminal(() => readWorkerResult(path, runId), timeout);
+}
+
+function waitForReviewResult(
+  path: string,
+  runId: string,
+  timeout: string,
+): Promise<ReviewResultState> {
+  return pollUntilTerminal(() => readReviewResult(path, runId), timeout);
 }
 
 async function reviewerHandoff(
@@ -143,6 +167,38 @@ async function block(
   options: ReviewLoopOptions,
 ): Promise<void> {
   await options.beads.markBlocked(options.bead.id, locations);
+}
+
+/**
+ * Report `message`, mark the bead blocked using the implementation agent's
+ * worktree/transcript handoff, and settle the loop as 'blocked'.
+ *
+ * This is the implementation-side half of the "report, hand off, block"
+ * protocol that recurs whenever something goes wrong before or while the
+ * implementation agent is the one holding context (startup, its own result,
+ * or a review-fix round). The reviewer-side half is
+ * `blockWithReviewerHandoff`; they stay separate functions because each
+ * builds a different handoff and merging them behind a flag would just move
+ * the branch into the caller.
+ */
+async function blockWithImplementationHandoff(
+  message: string,
+  options: ReviewLoopOptions,
+): Promise<'blocked'> {
+  options.report(message);
+  await block(await options.implementationHandoff(), options);
+  return 'blocked';
+}
+
+/** The reviewer-side counterpart of `blockWithImplementationHandoff`. */
+async function blockWithReviewerHandoff(
+  message: string,
+  reviewer: StartedReviewer,
+  options: ReviewLoopOptions,
+): Promise<'blocked'> {
+  options.report(message);
+  await block(await reviewerHandoff(reviewer, options), options);
+  return 'blocked';
 }
 
 async function requestHuman(
@@ -164,37 +220,17 @@ async function requestHuman(
   }
 }
 
-async function waitForReviewResult(
-  path: string,
-  runId: string,
-  timeout: string,
-): Promise<ReviewResultState> {
-  const deadline = Date.now() + parseDurationMs(timeout, 'blocked_timeout');
-  while (true) {
-    const result = await readReviewResult(path, runId);
-    if (result.kind !== 'missing' && result.kind !== 'stale') {
-      return result;
-    }
-
-    const remaining = deadline - Date.now();
-    if (remaining <= 0) {
-      return result;
-    }
-    await delay(Math.min(250, remaining));
-  }
-}
-
 async function blockReviewProblem(
   result: ReviewProblem,
   reviewer: StartedReviewer,
   options: ReviewLoopOptions,
 ): Promise<'blocked'> {
   const detail = reviewProblemDetail(result);
-  options.report(
+  return blockWithReviewerHandoff(
     `gis: reviewer result ${result.kind} for ${options.bead.id}: ${detail}`,
+    reviewer,
+    options,
   );
-  await block(await reviewerHandoff(reviewer, options), options);
-  return 'blocked';
 }
 
 async function blockImplementationProblem(
@@ -202,11 +238,10 @@ async function blockImplementationProblem(
   options: ReviewLoopOptions,
 ): Promise<'blocked'> {
   const detail = workerResultProblemDetail(result);
-  options.report(
+  return blockWithImplementationHandoff(
     `gis: implementation result ${result.kind} for ${options.bead.id}: ${detail}`,
+    options,
   );
-  await block(await options.implementationHandoff(), options);
-  return 'blocked';
 }
 
 async function handleImplementationResult(
@@ -221,11 +256,10 @@ async function handleImplementationResult(
       options.config.blocked_timeout,
     );
   } catch (error: unknown) {
-    options.report(
+    return blockWithImplementationHandoff(
       `gis: implementation result read failed for ${options.bead.id}: ${errorMessage(error)}`,
+      options,
     );
-    await block(await options.implementationHandoff(), options);
-    return 'blocked';
   }
 
   switch (result.kind) {
@@ -263,21 +297,32 @@ async function requestReviewLimitDecision(
   return requestHuman(reason, locations, options);
 }
 
-/** Run the review state machine after implementation verification succeeds. */
-export async function runReviewLoop(
+type ReviewSession =
+  | { readonly reviewer: StartedReviewer }
+  | { readonly outcome: 'blocked' };
+
+/**
+ * Start the reviewer in a sibling pane.
+ *
+ * Invariants/order: the Herdr pane.split guard runs before anything else
+ * (see the comment on that guard below); reviewer startup failures and a
+ * same-kind fallback report are both handled here so the caller only ever
+ * sees a ready `StartedReviewer` or a terminal 'blocked' outcome.
+ */
+async function startReviewSession(
   options: ReviewLoopOptions,
-): Promise<ReviewLoopOutcome> {
+): Promise<ReviewSession> {
   // Defense for callers that invoke runReviewLoop directly. On the normal
   // path, createBeadJobProcessor (run-worker.ts) already rejects a
   // config.review=true + herdr without pane.split combination at
   // construction time, before any bead is dispatched, so this branch is not
   // reachable when running through that processor.
   if (options.herdr.paneSplit === undefined) {
-    options.report(
+    const outcome = await blockWithImplementationHandoff(
       `gis: reviewer startup failed for ${options.bead.id}: Herdr pane.split is unavailable`,
+      options,
     );
-    await block(await options.implementationHandoff(), options);
-    return 'blocked';
+    return { outcome };
   }
 
   let reviewer: StartedReviewer;
@@ -295,11 +340,11 @@ export async function runReviewLoop(
       reviewFeedback: options.getSlopFeedback?.(),
     });
   } catch (error: unknown) {
-    options.report(
+    const outcome = await blockWithImplementationHandoff(
       `gis: reviewer startup failed for ${options.bead.id}: ${errorMessage(error)}`,
+      options,
     );
-    await block(await options.implementationHandoff(), options);
-    return 'blocked';
+    return { outcome };
   }
 
   if (reviewer.selection.candidate.kind === options.implementation.kind) {
@@ -308,55 +353,205 @@ export async function runReviewLoop(
     );
   }
 
+  return { reviewer };
+}
+
+type ReviewVerdict = ReviewResultState | { readonly outcome: 'blocked' };
+
+/**
+ * Wait for the reviewer agent to finish its round, then read its verdict.
+ *
+ * Order: the agent wait always happens before the result read, matching the
+ * original inline loop. Any failure along either step (an agent-wait error,
+ * an agent-wait 'blocked' status, or an unexpected result-read error) is
+ * folded into an `{ outcome: 'blocked' }` so the caller has one shape to
+ * check before switching on the verdict kind.
+ */
+async function awaitReviewVerdict(
+  reviewer: StartedReviewer,
+  prompt: WorkerPrompt,
+  options: ReviewLoopOptions,
+): Promise<ReviewVerdict> {
+  let reviewerStatus: 'done' | 'blocked';
+  try {
+    const resolveTranscriptPath = () =>
+      options.reviewerTranscriptPath(reviewer);
+    const waitResult = await options.blocked.wait({
+      ...options.implementationWaitOptions,
+      target: reviewer.agentName,
+      transcriptPath: await resolveTranscriptPath(),
+      resolveTranscriptPath,
+    });
+    reviewerStatus = waitResult.status;
+  } catch (error: unknown) {
+    const outcome = await blockWithReviewerHandoff(
+      `gis: reviewer wait failed for ${options.bead.id}: ${errorMessage(error)}`,
+      reviewer,
+      options,
+    );
+    return { outcome };
+  }
+  if (reviewerStatus === 'blocked') {
+    return { outcome: 'blocked' };
+  }
+
+  try {
+    return await waitForReviewResult(
+      prompt.resultPath,
+      prompt.runId,
+      options.config.blocked_timeout,
+    );
+  } catch (error: unknown) {
+    const outcome = await blockWithReviewerHandoff(
+      `gis: reviewer result read failed for ${options.bead.id}: ${errorMessage(error)}`,
+      reviewer,
+      options,
+    );
+    return { outcome };
+  }
+}
+
+type ReviewFixCycleResult =
+  | { readonly kind: 'terminal'; readonly outcome: ReviewLoopOutcome }
+  | {
+      readonly kind: 'continue';
+      readonly round: number;
+      readonly prompt: WorkerPrompt;
+      readonly lastSlopFeedback: string | undefined;
+    };
+
+/**
+ * Run one "reviewer requested changes" cycle: decide whether the review
+ * round limit has been reached, or else send the feedback back to the
+ * implementation agent, re-verify its fix, and prompt the reviewer for the
+ * next round.
+ *
+ * Order: review-limit check, implementation prompt, implementation wait,
+ * implementation result, re-verification, reviewer re-prompt — matching the
+ * original inline branch exactly. Returns either a terminal
+ * `ReviewLoopOutcome` or the state (`round`, `prompt`, `lastSlopFeedback`)
+ * the caller's loop should continue with.
+ */
+async function runReviewFixCycle(
+  reviewer: StartedReviewer,
+  round: number,
+  feedback: string,
+  lastSlopFeedback: string | undefined,
+  options: ReviewLoopOptions,
+): Promise<ReviewFixCycleResult> {
+  if (round >= options.config.review_max) {
+    const outcome = await requestReviewLimitDecision(
+      feedback,
+      reviewer,
+      options,
+    );
+    return { kind: 'terminal', outcome };
+  }
+
+  options.report(
+    `gis: reviewer requested changes for ${options.bead.id}; returning to implementation agent ${options.implementation.agentName}`,
+  );
+  const implementationPrompt = await promptWorker({
+    bead: options.bead,
+    runPath: options.worktree.runPath,
+    verifyCommand: options.config.verify,
+    round: round + 1,
+    phase: 'review-fix',
+    reviewFeedback: feedback,
+    target: options.implementation.agentName,
+    herdr: options.herdr,
+  });
+
+  let implementationWait: AgentWaitHandlingResult;
+  try {
+    implementationWait = await options.blocked.wait(
+      options.implementationWaitOptions,
+    );
+  } catch (error: unknown) {
+    const outcome = await blockWithImplementationHandoff(
+      `gis: implementation wait failed for ${options.bead.id}: ${errorMessage(error)}`,
+      options,
+    );
+    return { kind: 'terminal', outcome };
+  }
+  if (implementationWait.status === 'blocked') {
+    return { kind: 'terminal', outcome: 'blocked' };
+  }
+
+  const implementationOutcome = await handleImplementationResult(
+    implementationPrompt.prompt,
+    options,
+  );
+  if (implementationOutcome !== 'success') {
+    return { kind: 'terminal', outcome: implementationOutcome };
+  }
+  if (
+    (await options.verifyImplementation({ kind: 'review', round })) ===
+    'blocked'
+  ) {
+    return { kind: 'terminal', outcome: 'blocked' };
+  }
+
+  const nextRound = round + 1;
+  try {
+    const currentSlop = options.getSlopFeedback?.();
+    const slopUpdate =
+      currentSlop === lastSlopFeedback ? undefined : currentSlop;
+    const prompted = await promptReviewer({
+      bead: options.bead,
+      runPath: options.worktree.runPath,
+      verifyCommand: options.config.verify,
+      target: reviewer.agentName,
+      round: nextRound,
+      implementationKind: options.implementation.kind,
+      feedback: [slopUpdate, feedback]
+        .filter((value): value is string => value !== undefined)
+        .join('\n\n'),
+      herdr: options.herdr,
+    });
+    return {
+      kind: 'continue',
+      round: nextRound,
+      prompt: prompted.prompt,
+      lastSlopFeedback: currentSlop,
+    };
+  } catch (error: unknown) {
+    const outcome = await blockWithReviewerHandoff(
+      `gis: reviewer prompt failed for ${options.bead.id}: ${errorMessage(error)}`,
+      reviewer,
+      options,
+    );
+    return { kind: 'terminal', outcome };
+  }
+}
+
+/** Run the review state machine after implementation verification succeeds. */
+export async function runReviewLoop(
+  options: ReviewLoopOptions,
+): Promise<ReviewLoopOutcome> {
+  const session = await startReviewSession(options);
+  if ('outcome' in session) {
+    return session.outcome;
+  }
+  const { reviewer } = session;
+
   let round = 1;
   let prompt = reviewer.selection.result.prompt;
   let lastSlopFeedback = options.getSlopFeedback?.();
 
   while (true) {
-    let reviewerStatus: 'done' | 'blocked';
-    try {
-      const resolveTranscriptPath = () =>
-        options.reviewerTranscriptPath(reviewer);
-      const waitResult = await options.blocked.wait({
-        ...options.implementationWaitOptions,
-        target: reviewer.agentName,
-        transcriptPath: await resolveTranscriptPath(),
-        resolveTranscriptPath,
-      });
-      reviewerStatus = waitResult.status;
-    } catch (error: unknown) {
-      options.report(
-        `gis: reviewer wait failed for ${options.bead.id}: ${errorMessage(error)}`,
-      );
-      await block(await reviewerHandoff(reviewer, options), options);
-      return 'blocked';
-    }
-    if (reviewerStatus === 'blocked') {
-      return 'blocked';
+    const verdict = await awaitReviewVerdict(reviewer, prompt, options);
+    if ('outcome' in verdict) {
+      return verdict.outcome;
     }
 
-    let result: ReviewResultState;
-    try {
-      result = await waitForReviewResult(
-        prompt.resultPath,
-        prompt.runId,
-        options.config.blocked_timeout,
-      );
-    } catch (error: unknown) {
-      options.report(
-        `gis: reviewer result read failed for ${options.bead.id}: ${errorMessage(error)}`,
-      );
-      await block(await reviewerHandoff(reviewer, options), options);
-      return 'blocked';
-    }
-
-    switch (result.kind) {
+    switch (verdict.kind) {
       case 'success':
         return 'approved';
 
       case 'needs_human':
         return requestHuman(
-          result.reason,
+          verdict.reason,
           await reviewerHandoff(reviewer, options),
           options,
         );
@@ -366,87 +561,28 @@ export async function runReviewLoop(
       case 'invalid_json':
       case 'stale':
       case 'missing':
-        return blockReviewProblem(result, reviewer, options);
+        return blockReviewProblem(verdict, reviewer, options);
 
       case 'changes_requested': {
-        const feedback = requestedChangesFeedback(result);
-        if (round >= options.config.review_max) {
-          return requestReviewLimitDecision(feedback, reviewer, options);
-        }
-
-        options.report(
-          `gis: reviewer requested changes for ${options.bead.id}; returning to implementation agent ${options.implementation.agentName}`,
-        );
-        const implementationPrompt = await promptWorker({
-          bead: options.bead,
-          runPath: options.worktree.runPath,
-          verifyCommand: options.config.verify,
-          round: round + 1,
-          phase: 'review-fix',
-          reviewFeedback: feedback,
-          target: options.implementation.agentName,
-          herdr: options.herdr,
-        });
-        let implementationWait: AgentWaitHandlingResult;
-        try {
-          implementationWait = await options.blocked.wait(
-            options.implementationWaitOptions,
-          );
-        } catch (error: unknown) {
-          options.report(
-            `gis: implementation wait failed for ${options.bead.id}: ${errorMessage(error)}`,
-          );
-          await block(await options.implementationHandoff(), options);
-          return 'blocked';
-        }
-        if (implementationWait.status === 'blocked') {
-          return 'blocked';
-        }
-        const implementationOutcome = await handleImplementationResult(
-          implementationPrompt.prompt,
+        const feedback = requestedChangesFeedback(verdict);
+        const cycle = await runReviewFixCycle(
+          reviewer,
+          round,
+          feedback,
+          lastSlopFeedback,
           options,
         );
-        if (implementationOutcome !== 'success') {
-          return implementationOutcome;
+        if (cycle.kind === 'terminal') {
+          return cycle.outcome;
         }
-        if (
-          (await options.verifyImplementation({ kind: 'review', round })) ===
-          'blocked'
-        ) {
-          return 'blocked';
-        }
-
-        round += 1;
-        try {
-          const currentSlop = options.getSlopFeedback?.();
-          const slopUpdate =
-            currentSlop === lastSlopFeedback ? undefined : currentSlop;
-          lastSlopFeedback = currentSlop;
-          const prompted = await promptReviewer({
-            bead: options.bead,
-            runPath: options.worktree.runPath,
-            verifyCommand: options.config.verify,
-            target: reviewer.agentName,
-            round,
-            implementationKind: options.implementation.kind,
-            feedback: [slopUpdate, feedback]
-              .filter((value): value is string => value !== undefined)
-              .join('\n\n'),
-            herdr: options.herdr,
-          });
-          prompt = prompted.prompt;
-        } catch (error: unknown) {
-          options.report(
-            `gis: reviewer prompt failed for ${options.bead.id}: ${errorMessage(error)}`,
-          );
-          await block(await reviewerHandoff(reviewer, options), options);
-          return 'blocked';
-        }
+        round = cycle.round;
+        prompt = cycle.prompt;
+        lastSlopFeedback = cycle.lastSlopFeedback;
         break;
       }
 
       default:
-        return assertNever(result);
+        return assertNever(verdict);
     }
   }
 }

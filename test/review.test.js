@@ -952,3 +952,873 @@ test('uses the reviewer session for reviewer blocked handoff locations', async (
     await rm(root, { recursive: true, force: true });
   }
 });
+
+// --- runReviewLoop branch coverage -----------------------------------------
+//
+// The tests below drive runReviewLoop directly (as the "handles review-fix
+// implementation ... results" tests above do) to exercise every blocked/
+// human/error branch inside the state machine, since runForegroundLoop's
+// happy-path tests never take these branches.
+
+function reviewLoopConfig(overrides = {}) {
+  return config({ review_max: 2, blocked_timeout: '1s', ...overrides });
+}
+
+async function writeRoundResult(root, runPath, role, payload) {
+  const promptPath = join(
+    runPath,
+    role === 'review' ? 'review-prompt.md' : 'implement-prompt.md',
+  );
+  const prompt = await readFile(promptPath, 'utf8');
+  const runId = /Run ID: `([^`]+)`/.exec(prompt)?.[1];
+  const resultRelative = /write a JSON result to `([^`]+)`/.exec(prompt)?.[1];
+  assert.ok(runId);
+  assert.ok(resultRelative);
+  await writeFile(
+    join(root, resultRelative),
+    JSON.stringify({ run_id: runId, ...payload }),
+  );
+}
+
+function baseReviewLoopOptions({
+  root,
+  runPath,
+  source,
+  cfg,
+  herdr,
+  blockedWait,
+  beads,
+  verifyImplementation,
+  report,
+  onHumanGate,
+}) {
+  return {
+    bead: source,
+    worktree: {
+      beadId: source.id,
+      path: root,
+      runPath,
+      workspaceId: 'workspace-1',
+      paneId: 'implementation-pane',
+    },
+    config: cfg,
+    implementation: {
+      agentName: 'implementation-agent',
+      kind: 'codex',
+      candidate: cfg.profiles.implement[0],
+    },
+    herdr,
+    beads,
+    blocked: { wait: blockedWait },
+    implementationWaitOptions: {
+      beadId: source.id,
+      target: 'implementation-agent',
+      worktreePath: root,
+      roundLogPath: runPath,
+      transcriptPath: join(root, 'implementation-session.jsonl'),
+      blockedTimeout: cfg.blocked_timeout,
+      workerTimeout: cfg.blocked_timeout,
+      herdr: {},
+      beads: {},
+    },
+    implementationHandoff: async () => ({
+      worktreePath: root,
+      roundLogPath: runPath,
+      transcriptPath: join(root, 'implementation-session.jsonl'),
+    }),
+    reviewerTranscriptPath: async () => join(root, 'review-session.jsonl'),
+    verifyImplementation: verifyImplementation ?? (async () => 'verified'),
+    onHumanGate: onHumanGate ?? (() => undefined),
+    report: report ?? (() => undefined),
+  };
+}
+
+function readyReviewerHerdr({ reviewerName, agentKind = 'claude', onPrompt }) {
+  let snapshotCalls = 0;
+  return {
+    async paneSplit() {
+      return { type: 'pane_split', pane: { pane_id: 'review-pane' } };
+    },
+    async apiSnapshot() {
+      snapshotCalls += 1;
+      return {
+        type: 'session_snapshot',
+        snapshot: {
+          agents: [
+            {
+              pane_id: 'review-pane',
+              name: reviewerName,
+              agent: agentKind,
+              agent_status: 'done',
+              interactive_ready: true,
+              launch_pending: false,
+              state_change_seq: snapshotCalls,
+            },
+          ],
+        },
+      };
+    },
+    async agentStart(options) {
+      return {
+        type: 'agent_started',
+        agent: { pane_id: options.paneId },
+        argv: [],
+      };
+    },
+    async agentPrompt(target, text) {
+      await onPrompt?.(target, text);
+      return { type: 'agent_prompted', agent: { pane_id: target } };
+    },
+  };
+}
+
+test('blocks without starting a reviewer when herdr pane.split is unavailable', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'gis-review-nosplit-'));
+  const runPath = join(root, '.gis', 'run');
+  const source = { ...bead, id: 'gis-review-nosplit' };
+  const cfg = reviewLoopConfig();
+  const blocked = [];
+  const reports = [];
+  try {
+    const outcome = await runReviewLoop(
+      baseReviewLoopOptions({
+        root,
+        runPath,
+        source,
+        cfg,
+        herdr: {},
+        blockedWait: async () => {
+          throw new Error('blocked.wait should not be called');
+        },
+        beads: {
+          async markBlocked(id, locations) {
+            blocked.push({ id, locations });
+            return { ...source, id, status: 'blocked' };
+          },
+          async createHumanGate() {
+            throw new Error('human gate should not be needed');
+          },
+        },
+        verifyImplementation: async () => {
+          throw new Error('verification must not run');
+        },
+        report: (message) => reports.push(message),
+      }),
+    );
+
+    assert.equal(outcome, 'blocked');
+    assert.equal(blocked.length, 1);
+    assert.match(reports[0], /Herdr pane\.split is unavailable/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('blocks when the reviewer fails to start', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'gis-review-startfail-'));
+  const runPath = join(root, '.gis', 'run');
+  await mkdir(runPath, { recursive: true });
+  const source = { ...bead, id: 'gis-review-startfail' };
+  const cfg = reviewLoopConfig();
+  const blocked = [];
+  const reports = [];
+  try {
+    const outcome = await runReviewLoop(
+      baseReviewLoopOptions({
+        root,
+        runPath,
+        source,
+        cfg,
+        herdr: {
+          async paneSplit() {
+            throw new Error('herdr unavailable');
+          },
+        },
+        blockedWait: async () => {
+          throw new Error('blocked.wait should not be called');
+        },
+        beads: {
+          async markBlocked(id, locations) {
+            blocked.push({ id, locations });
+            return { ...source, id, status: 'blocked' };
+          },
+          async createHumanGate() {
+            throw new Error('human gate should not be needed');
+          },
+        },
+        verifyImplementation: async () => {
+          throw new Error('verification must not run');
+        },
+        report: (message) => reports.push(message),
+      }),
+    );
+
+    assert.equal(outcome, 'blocked');
+    assert.equal(blocked.length, 1);
+    assert.match(reports[0], /reviewer startup failed/);
+    assert.match(reports[0], /herdr unavailable/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('reports a reviewer kind fallback and still completes the review', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'gis-review-fallback-kind-'));
+  const runPath = join(root, '.gis', 'run');
+  await mkdir(runPath, { recursive: true });
+  const source = { ...bead, id: 'gis-review-fallback-kind' };
+  const reviewerName = reviewAgentName(source.id);
+  // Only the implementation's own kind is configured, so the reviewer must
+  // fall back to it instead of the usual opposite-vendor reviewer.
+  const cfg = reviewLoopConfig({ kinds: ['codex'] });
+  const reports = [];
+  try {
+    const outcome = await runReviewLoop(
+      baseReviewLoopOptions({
+        root,
+        runPath,
+        source,
+        cfg,
+        herdr: readyReviewerHerdr({
+          reviewerName,
+          agentKind: 'codex',
+          onPrompt: async (target) => {
+            if (target === reviewerName) {
+              await writeRoundResult(root, runPath, 'review', {
+                status: 'done',
+                summary: 'looks good',
+                verdict: 'approved',
+              });
+            }
+          },
+        }),
+        blockedWait: async () => ({
+          status: 'done',
+          wasBlocked: false,
+          worktreeRetained: false,
+        }),
+        beads: {
+          async markBlocked() {
+            throw new Error('should not block');
+          },
+          async createHumanGate() {
+            throw new Error('should not need a human gate');
+          },
+        },
+        report: (message) => reports.push(message),
+      }),
+    );
+
+    assert.equal(outcome, 'approved');
+    assert.ok(
+      reports.some((message) => /reviewer kind fallback/.test(message)),
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('returns blocked immediately when the initial reviewer wait reports blocked', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'gis-review-wait-blocked-'));
+  const runPath = join(root, '.gis', 'run');
+  await mkdir(runPath, { recursive: true });
+  const source = { ...bead, id: 'gis-review-wait-blocked' };
+  const reviewerName = reviewAgentName(source.id);
+  const cfg = reviewLoopConfig();
+  const blocked = [];
+  try {
+    const outcome = await runReviewLoop(
+      baseReviewLoopOptions({
+        root,
+        runPath,
+        source,
+        cfg,
+        herdr: readyReviewerHerdr({ reviewerName }),
+        blockedWait: async () => ({
+          status: 'blocked',
+          wasBlocked: true,
+          worktreeRetained: true,
+        }),
+        beads: {
+          async markBlocked(id, locations) {
+            blocked.push({ id, locations });
+            return { ...source, id, status: 'blocked' };
+          },
+          async createHumanGate() {
+            throw new Error('human gate should not be needed');
+          },
+        },
+        verifyImplementation: async () => {
+          throw new Error('verification must not run');
+        },
+      }),
+    );
+
+    assert.equal(outcome, 'blocked');
+    // The wait helper already accounts for the block; runReviewLoop must not
+    // mark the bead blocked a second time on this path.
+    assert.equal(blocked.length, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+for (const scenario of [
+  { name: 'accepted', createsGate: true, expectedOutcome: 'human' },
+  { name: 'rejected', createsGate: false, expectedOutcome: 'blocked' },
+]) {
+  test(`handles a reviewer needs_human result whose human gate creation is ${scenario.name}`, async () => {
+    const root = await mkdtemp(
+      join(tmpdir(), `gis-review-needs-human-${scenario.name}-`),
+    );
+    const runPath = join(root, '.gis', 'run');
+    await mkdir(runPath, { recursive: true });
+    const source = { ...bead, id: `gis-review-needs-human-${scenario.name}` };
+    const reviewerName = reviewAgentName(source.id);
+    const cfg = reviewLoopConfig();
+    const blocked = [];
+    const gates = [];
+    try {
+      const outcome = await runReviewLoop(
+        baseReviewLoopOptions({
+          root,
+          runPath,
+          source,
+          cfg,
+          herdr: readyReviewerHerdr({
+            reviewerName,
+            onPrompt: async (target) => {
+              if (target === reviewerName) {
+                await writeRoundResult(root, runPath, 'review', {
+                  status: 'done',
+                  summary: 'unsure how to proceed',
+                  verdict: 'changes_requested',
+                  needs_human: 'Choose the migration strategy.',
+                });
+              }
+            },
+          }),
+          blockedWait: async () => ({
+            status: 'done',
+            wasBlocked: false,
+            worktreeRetained: false,
+          }),
+          beads: {
+            async markBlocked(id, locations) {
+              blocked.push({ id, locations });
+              return { ...source, id, status: 'blocked' };
+            },
+            async createHumanGate(request) {
+              if (!scenario.createsGate) {
+                throw new Error('human gate creation failed');
+              }
+              const gate = {
+                ...source,
+                id: `${source.id}-human`,
+                status: 'open',
+              };
+              gates.push({ request, gate });
+              return gate;
+            },
+          },
+          verifyImplementation: async () => {
+            throw new Error('verification must not run');
+          },
+        }),
+      );
+
+      assert.equal(outcome, scenario.expectedOutcome);
+      assert.equal(blocked.length, 1);
+      assert.equal(gates.length, scenario.createsGate ? 1 : 0);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+}
+
+test('blocks when the reviewer result cannot be read before the timeout', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'gis-review-result-timeout-'));
+  const runPath = join(root, '.gis', 'run');
+  await mkdir(runPath, { recursive: true });
+  const source = { ...bead, id: 'gis-review-result-timeout' };
+  const reviewerName = reviewAgentName(source.id);
+  const cfg = reviewLoopConfig({ blocked_timeout: '150ms' });
+  const blocked = [];
+  const reports = [];
+  try {
+    const outcome = await runReviewLoop(
+      baseReviewLoopOptions({
+        root,
+        runPath,
+        source,
+        cfg,
+        // Never writes a review result file, so waitForReviewResult times
+        // out and returns a 'missing' problem.
+        herdr: readyReviewerHerdr({ reviewerName }),
+        blockedWait: async () => ({
+          status: 'done',
+          wasBlocked: false,
+          worktreeRetained: false,
+        }),
+        beads: {
+          async markBlocked(id, locations) {
+            blocked.push({ id, locations });
+            return { ...source, id, status: 'blocked' };
+          },
+          async createHumanGate() {
+            throw new Error('human gate should not be needed');
+          },
+        },
+        verifyImplementation: async () => {
+          throw new Error('verification must not run');
+        },
+        report: (message) => reports.push(message),
+      }),
+    );
+
+    assert.equal(outcome, 'blocked');
+    assert.equal(blocked.length, 1);
+    assert.match(reports[0], /reviewer result missing/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('blocks when reading the reviewer result throws an unexpected error', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'gis-review-result-throw-'));
+  const runPath = join(root, '.gis', 'run');
+  await mkdir(runPath, { recursive: true });
+  const source = { ...bead, id: 'gis-review-result-throw' };
+  const reviewerName = reviewAgentName(source.id);
+  const cfg = reviewLoopConfig();
+  const blocked = [];
+  const reports = [];
+  try {
+    const outcome = await runReviewLoop(
+      baseReviewLoopOptions({
+        root,
+        runPath,
+        source,
+        cfg,
+        herdr: readyReviewerHerdr({ reviewerName }),
+        // The review prompt is left unanswered: instead the expected result
+        // path is turned into a directory so readFile rejects with a
+        // non-ENOENT error that waitForReviewResult must not swallow.
+        blockedWait: async () => {
+          await mkdir(join(runPath, 'round-1-review.json'), {
+            recursive: true,
+          });
+          return { status: 'done', wasBlocked: false, worktreeRetained: false };
+        },
+        beads: {
+          async markBlocked(id, locations) {
+            blocked.push({ id, locations });
+            return { ...source, id, status: 'blocked' };
+          },
+          async createHumanGate() {
+            throw new Error('human gate should not be needed');
+          },
+        },
+        verifyImplementation: async () => {
+          throw new Error('verification must not run');
+        },
+        report: (message) => reports.push(message),
+      }),
+    );
+
+    assert.equal(outcome, 'blocked');
+    assert.equal(blocked.length, 1);
+    assert.match(reports[0], /reviewer result read failed/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('asks a human to decide once the review round limit is reached', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'gis-review-limit-'));
+  const runPath = join(root, '.gis', 'run');
+  await mkdir(runPath, { recursive: true });
+  const source = { ...bead, id: 'gis-review-limit' };
+  const reviewerName = reviewAgentName(source.id);
+  const cfg = reviewLoopConfig({ review_max: 1 });
+  const gates = [];
+  try {
+    const outcome = await runReviewLoop(
+      baseReviewLoopOptions({
+        root,
+        runPath,
+        source,
+        cfg,
+        herdr: readyReviewerHerdr({
+          reviewerName,
+          onPrompt: async (target) => {
+            if (target === reviewerName) {
+              await writeRoundResult(root, runPath, 'review', {
+                status: 'done',
+                summary: 'Please fix null handling',
+                verdict: 'changes_requested',
+                feedback: 'Handle null input before dereferencing it.',
+              });
+            }
+          },
+        }),
+        blockedWait: async () => ({
+          status: 'done',
+          wasBlocked: false,
+          worktreeRetained: false,
+        }),
+        beads: {
+          async markBlocked() {
+            return { ...source, status: 'blocked' };
+          },
+          async createHumanGate(request) {
+            const gate = {
+              ...source,
+              id: `${source.id}-human`,
+              status: 'open',
+            };
+            gates.push({ request, gate });
+            return gate;
+          },
+        },
+        verifyImplementation: async () => {
+          throw new Error('verification must not run');
+        },
+      }),
+    );
+
+    assert.equal(outcome, 'human');
+    assert.equal(gates.length, 1);
+    assert.match(gates[0].request.reason, /review_max=1 reached/);
+    assert.match(
+      gates[0].request.reason,
+      /Handle null input before dereferencing it\./,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('blocks when reading the implementation result throws during review-fix', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'gis-review-fix-read-throw-'));
+  const runPath = join(root, '.gis', 'run');
+  await mkdir(runPath, { recursive: true });
+  const source = { ...bead, id: 'gis-review-fix-read-throw' };
+  const reviewerName = reviewAgentName(source.id);
+  const cfg = reviewLoopConfig();
+  const blocked = [];
+  const reports = [];
+  try {
+    const outcome = await runReviewLoop(
+      baseReviewLoopOptions({
+        root,
+        runPath,
+        source,
+        cfg,
+        herdr: readyReviewerHerdr({
+          reviewerName,
+          onPrompt: async (target) => {
+            if (target === reviewerName) {
+              await writeRoundResult(root, runPath, 'review', {
+                status: 'done',
+                summary: 'Please fix the reported issue.',
+                verdict: 'changes_requested',
+                feedback: 'Fix the reported issue before review.',
+              });
+            }
+            // The implementation prompt is left unanswered: the wait fake
+            // below turns the expected result path into a directory so the
+            // read throws an unexpected (non-ENOENT) error.
+          },
+        }),
+        blockedWait: async (options) => {
+          if (options.target === reviewerName) {
+            return {
+              status: 'done',
+              wasBlocked: false,
+              worktreeRetained: false,
+            };
+          }
+          await mkdir(join(runPath, 'round-2-impl-review-fix.json'), {
+            recursive: true,
+          });
+          return { status: 'done', wasBlocked: false, worktreeRetained: false };
+        },
+        beads: {
+          async markBlocked(id, locations) {
+            blocked.push({ id, locations });
+            return { ...source, id, status: 'blocked' };
+          },
+          async createHumanGate() {
+            throw new Error('human gate should not be needed');
+          },
+        },
+        verifyImplementation: async () => {
+          throw new Error('verification must not run');
+        },
+        report: (message) => reports.push(message),
+      }),
+    );
+
+    assert.equal(outcome, 'blocked');
+    assert.equal(blocked.length, 1);
+    assert.match(reports.at(-1), /implementation result read failed/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('returns blocked immediately when the review-fix implementation wait reports blocked', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'gis-review-fix-wait-blocked-'));
+  const runPath = join(root, '.gis', 'run');
+  await mkdir(runPath, { recursive: true });
+  const source = { ...bead, id: 'gis-review-fix-wait-blocked' };
+  const reviewerName = reviewAgentName(source.id);
+  const cfg = reviewLoopConfig();
+  const blocked = [];
+  try {
+    const outcome = await runReviewLoop(
+      baseReviewLoopOptions({
+        root,
+        runPath,
+        source,
+        cfg,
+        herdr: readyReviewerHerdr({
+          reviewerName,
+          onPrompt: async (target) => {
+            if (target === reviewerName) {
+              await writeRoundResult(root, runPath, 'review', {
+                status: 'done',
+                summary: 'Please fix the reported issue.',
+                verdict: 'changes_requested',
+                feedback: 'Fix the reported issue before review.',
+              });
+            }
+          },
+        }),
+        blockedWait: async (options) => {
+          if (options.target === reviewerName) {
+            return {
+              status: 'done',
+              wasBlocked: false,
+              worktreeRetained: false,
+            };
+          }
+          return {
+            status: 'blocked',
+            wasBlocked: true,
+            worktreeRetained: true,
+          };
+        },
+        beads: {
+          async markBlocked(id, locations) {
+            blocked.push({ id, locations });
+            return { ...source, id, status: 'blocked' };
+          },
+          async createHumanGate() {
+            throw new Error('human gate should not be needed');
+          },
+        },
+        verifyImplementation: async () => {
+          throw new Error('verification must not run');
+        },
+      }),
+    );
+
+    assert.equal(outcome, 'blocked');
+    assert.equal(blocked.length, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('blocks when the review-fix implementation wait throws', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'gis-review-fix-wait-throw-'));
+  const runPath = join(root, '.gis', 'run');
+  await mkdir(runPath, { recursive: true });
+  const source = { ...bead, id: 'gis-review-fix-wait-throw' };
+  const reviewerName = reviewAgentName(source.id);
+  const cfg = reviewLoopConfig();
+  const blocked = [];
+  const reports = [];
+  try {
+    const outcome = await runReviewLoop(
+      baseReviewLoopOptions({
+        root,
+        runPath,
+        source,
+        cfg,
+        herdr: readyReviewerHerdr({
+          reviewerName,
+          onPrompt: async (target) => {
+            if (target === reviewerName) {
+              await writeRoundResult(root, runPath, 'review', {
+                status: 'done',
+                summary: 'Please fix the reported issue.',
+                verdict: 'changes_requested',
+                feedback: 'Fix the reported issue before review.',
+              });
+            }
+          },
+        }),
+        blockedWait: async (options) => {
+          if (options.target === reviewerName) {
+            return {
+              status: 'done',
+              wasBlocked: false,
+              worktreeRetained: false,
+            };
+          }
+          throw new Error('implementation pane disappeared');
+        },
+        beads: {
+          async markBlocked(id, locations) {
+            blocked.push({ id, locations });
+            return { ...source, id, status: 'blocked' };
+          },
+          async createHumanGate() {
+            throw new Error('human gate should not be needed');
+          },
+        },
+        verifyImplementation: async () => {
+          throw new Error('verification must not run');
+        },
+        report: (message) => reports.push(message),
+      }),
+    );
+
+    assert.equal(outcome, 'blocked');
+    assert.equal(blocked.length, 1);
+    assert.match(reports.at(-1), /implementation wait failed/);
+    assert.match(reports.at(-1), /implementation pane disappeared/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('returns blocked when re-verification fails during review-fix', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'gis-review-fix-verify-blocked-'));
+  const runPath = join(root, '.gis', 'run');
+  await mkdir(runPath, { recursive: true });
+  const source = { ...bead, id: 'gis-review-fix-verify-blocked' };
+  const reviewerName = reviewAgentName(source.id);
+  const cfg = reviewLoopConfig();
+  let verifyCalls = 0;
+  try {
+    const outcome = await runReviewLoop(
+      baseReviewLoopOptions({
+        root,
+        runPath,
+        source,
+        cfg,
+        herdr: readyReviewerHerdr({
+          reviewerName,
+          onPrompt: async (target) => {
+            if (target === reviewerName) {
+              await writeRoundResult(root, runPath, 'review', {
+                status: 'done',
+                summary: 'Please fix the reported issue.',
+                verdict: 'changes_requested',
+                feedback: 'Fix the reported issue before review.',
+              });
+            } else {
+              await writeRoundResult(root, runPath, 'implement', {
+                status: 'done',
+                summary: 'fixed',
+              });
+            }
+          },
+        }),
+        blockedWait: async () => ({
+          status: 'done',
+          wasBlocked: false,
+          worktreeRetained: false,
+        }),
+        beads: {
+          async markBlocked() {
+            throw new Error('should not block via markBlocked');
+          },
+          async createHumanGate() {
+            throw new Error('human gate should not be needed');
+          },
+        },
+        verifyImplementation: async () => {
+          verifyCalls += 1;
+          return 'blocked';
+        },
+      }),
+    );
+
+    assert.equal(outcome, 'blocked');
+    assert.equal(verifyCalls, 1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('blocks when prompting the reviewer for the next round fails', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'gis-review-fix-prompt-fail-'));
+  const runPath = join(root, '.gis', 'run');
+  await mkdir(runPath, { recursive: true });
+  const source = { ...bead, id: 'gis-review-fix-prompt-fail' };
+  const reviewerName = reviewAgentName(source.id);
+  const cfg = reviewLoopConfig();
+  const blocked = [];
+  const reports = [];
+  let reviewerPromptCount = 0;
+  try {
+    const outcome = await runReviewLoop(
+      baseReviewLoopOptions({
+        root,
+        runPath,
+        source,
+        cfg,
+        herdr: readyReviewerHerdr({
+          reviewerName,
+          onPrompt: async (target) => {
+            if (target === reviewerName) {
+              reviewerPromptCount += 1;
+              if (reviewerPromptCount === 1) {
+                await writeRoundResult(root, runPath, 'review', {
+                  status: 'done',
+                  summary: 'Please fix the reported issue.',
+                  verdict: 'changes_requested',
+                  feedback: 'Fix the reported issue before review.',
+                });
+                return;
+              }
+              throw new Error('reviewer pane rejected the round-2 prompt');
+            }
+            await writeRoundResult(root, runPath, 'implement', {
+              status: 'done',
+              summary: 'fixed',
+            });
+          },
+        }),
+        blockedWait: async () => ({
+          status: 'done',
+          wasBlocked: false,
+          worktreeRetained: false,
+        }),
+        beads: {
+          async markBlocked(id, locations) {
+            blocked.push({ id, locations });
+            return { ...source, id, status: 'blocked' };
+          },
+          async createHumanGate() {
+            throw new Error('human gate should not be needed');
+          },
+        },
+        verifyImplementation: async () => 'verified',
+        report: (message) => reports.push(message),
+      }),
+    );
+
+    assert.equal(outcome, 'blocked');
+    assert.equal(blocked.length, 1);
+    assert.match(reports.at(-1), /reviewer prompt failed/);
+    assert.match(reports.at(-1), /reviewer pane rejected the round-2 prompt/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
