@@ -53,14 +53,14 @@ function humanReasonIssue(record: Record<string, unknown>): string | undefined {
     : 'needs_human must be a non-empty string when present';
 }
 
+export type SharedResultField = 'status' | 'summary' | 'needs_human';
+
 export type ResultSchemaValidation =
   | { readonly kind: 'not_object'; readonly issue: string }
   | {
       readonly kind: 'record';
       readonly record: Record<string, unknown>;
-      readonly statusIssue?: string;
-      readonly summaryIssue?: string;
-      readonly humanReasonIssue?: string;
+      readonly issues: Readonly<Record<SharedResultField, string | undefined>>;
     };
 
 /** Validate and narrow the fields shared by worker and reviewer results. */
@@ -74,9 +74,11 @@ export function validateResultSchema(
   return {
     kind: 'record',
     record: value,
-    statusIssue: statusIssue(value),
-    summaryIssue: summaryIssue(value),
-    humanReasonIssue: humanReasonIssue(value),
+    issues: {
+      status: statusIssue(value),
+      summary: summaryIssue(value),
+      needs_human: humanReasonIssue(value),
+    },
   };
 }
 

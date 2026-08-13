@@ -77,11 +77,9 @@ export function workerResultProblemDetail(result: WorkerResultProblem): string {
 function schemaIssues(value: unknown): string[] {
   const validation = validateResultSchema(value, 'result');
   if (validation.kind === 'not_object') return [validation.issue];
-  return [
-    validation.statusIssue,
-    validation.summaryIssue,
-    validation.humanReasonIssue,
-  ].filter((issue): issue is string => issue !== undefined);
+  return Object.values(validation.issues).filter(
+    (issue): issue is string => issue !== undefined,
+  );
 }
 
 function asWorkerResult(value: Record<string, unknown>): WorkerResult {

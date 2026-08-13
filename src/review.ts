@@ -6,7 +6,11 @@ import {
   startWithProfileFallback,
   type ProfileStartResult,
 } from './profiles.js';
-import { requireNonEmpty, validateResultSchema } from './internal.js';
+import {
+  requireNonEmpty,
+  validateResultSchema,
+  type SharedResultField,
+} from './internal.js';
 import { type PaneSplitOptions, type PaneSplitResult } from './herdr.js';
 import {
   startWorker,
@@ -240,15 +244,20 @@ function schemaIssues(value: unknown): string[] {
   const validation = validateResultSchema(value, 'review result');
   if (validation.kind === 'not_object') return [validation.issue];
   const { record } = validation;
+  const sharedIssues = {
+    status: validation.issues.status,
+    summary: validation.issues.summary,
+    needs_human: validation.issues.needs_human,
+  } satisfies Readonly<Record<SharedResultField, string | undefined>>;
   const issues: string[] = [];
   if (typeof record.run_id !== 'string' || record.run_id.trim().length === 0) {
     issues.push('run_id must be a non-empty string');
   }
-  if (validation.statusIssue !== undefined) {
-    issues.push(validation.statusIssue);
+  if (sharedIssues.status !== undefined) {
+    issues.push(sharedIssues.status);
   }
-  if (validation.summaryIssue !== undefined) {
-    issues.push(validation.summaryIssue);
+  if (sharedIssues.summary !== undefined) {
+    issues.push(sharedIssues.summary);
   }
   if (record.verdict !== 'approved' && record.verdict !== 'changes_requested') {
     issues.push('verdict must be "approved" or "changes_requested"');
@@ -259,8 +268,8 @@ function schemaIssues(value: unknown): string[] {
   ) {
     issues.push('feedback must be a non-empty string when present');
   }
-  if (validation.humanReasonIssue !== undefined) {
-    issues.push(validation.humanReasonIssue);
+  if (sharedIssues.needs_human !== undefined) {
+    issues.push(sharedIssues.needs_human);
   }
   return issues;
 }
