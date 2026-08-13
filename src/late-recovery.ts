@@ -16,7 +16,7 @@ import {
   type MergeGitSource,
 } from './merge.js';
 import { createGitAdapter, type GitWorktree } from './recovery.js';
-import { readWorkerResult } from './result.js';
+import { readWorkerResult, type WorkerResult } from './result.js';
 import type { VerifyCommandRunner } from './verify.js';
 import { herdrAgentName } from './worker.js';
 import {
@@ -50,6 +50,10 @@ export interface LateRecoveryOptions {
   readonly worktreeGit?: LateRecoveryGitSource;
   readonly mergeGit?: MergeGitSource;
   readonly runVerify?: VerifyCommandRunner;
+  /** Deterministic seam for validating one metadata snapshot per candidate. */
+  readonly readMetadata?: (
+    worktreePath: string,
+  ) => Promise<RecoveryMetadata | undefined>;
 }
 
 function hasLegacyLateCommitNotes(bead: Bead): boolean {
@@ -68,20 +72,21 @@ function hasLegacyLateCommitNotes(bead: Bead): boolean {
 async function isLateCommitCandidate(
   bead: Bead,
   worktreePath: string | undefined,
+  metadata: RecoveryMetadata | undefined,
 ): Promise<boolean> {
   if (bead.status !== 'blocked') return false;
-  if (worktreePath === undefined) return hasLegacyLateCommitNotes(bead);
+  if (worktreePath === undefined || metadata === undefined) {
+    return hasLegacyLateCommitNotes(bead);
+  }
   try {
-    const metadata = await readRecoveryMetadata(worktreePath);
-    if (metadata === undefined) return hasLegacyLateCommitNotes(bead);
     validateMetadataForBead(metadata, bead.id);
     return (
       metadata.failureCode === 'commit' ||
       metadata.failureCode === 'ready_to_merge'
     );
   } catch {
-    // Invalid metadata is handled by recoverBead, which retains the worktree
-    // and reports a diagnostic instead of guessing a recovery transition.
+    // Invalid metadata is diagnosed by recoverBead and never guessed into a
+    // recoverable candidate, but must still reach it for a diagnostic.
     return true;
   }
 }
@@ -116,8 +121,11 @@ function workspaceIdFor(
   )?.workspace_id;
 }
 
-async function currentResult(worktreePath: string, expectedBeadId?: string) {
-  const metadata = await readRecoveryMetadata(worktreePath);
+async function currentResult(
+  worktreePath: string,
+  expectedBeadId: string | undefined,
+  metadata: RecoveryMetadata | undefined,
+) {
   if (metadata !== undefined) {
     if (expectedBeadId !== undefined)
       validateMetadataForBead(metadata, expectedBeadId);
@@ -140,7 +148,7 @@ async function currentResult(worktreePath: string, expectedBeadId?: string) {
         `recoverable metadata ${metadata.failureCode} has non-success result ${result.kind} at ${result.kind === 'missing' ? result.path : metadata.resultPath}`,
       );
     }
-    return result.kind === 'success' ? result : undefined;
+    return result.result;
   }
   const promptPath = resolve(
     worktreePath,
@@ -161,7 +169,7 @@ async function currentResult(worktreePath: string, expectedBeadId?: string) {
     if (resultInfo.mtimeMs < promptInfo.mtimeMs) return undefined;
   }
   const result = await readWorkerResult(resultPath, runId);
-  return result.kind === 'success' ? result : undefined;
+  return result.kind === 'success' ? result.result : undefined;
 }
 
 /** The transcript recorded on the bead itself, or the default unresolved path. */
@@ -196,24 +204,21 @@ interface BeadRecoveryContext {
 async function recoverBead(
   bead: Bead,
   context: BeadRecoveryContext,
+  metadata: RecoveryMetadata | undefined,
 ): Promise<boolean> {
   const retained = context.worktrees.find(
     (worktree) => worktree.branch === bead.id,
   );
   if (retained === undefined) return false;
   const worktreePath = resolve(context.cwd, retained.path);
-  let metadata: RecoveryMetadata | undefined;
-  let structuredResult:
-    | Awaited<ReturnType<typeof readWorkerResult>>
-    | undefined;
+  let structuredResult: WorkerResult | undefined;
   try {
-    metadata = await readRecoveryMetadata(worktreePath);
     if (metadata !== undefined) {
       validateMetadataForBead(metadata, bead.id);
       // Validate containment and run identity before workspace/commit gates so
       // contradictions are diagnosed and retained rather than silently
       // skipped by an earlier no-workspace/no-commit return.
-      structuredResult = await currentResult(worktreePath, bead.id);
+      structuredResult = await currentResult(worktreePath, bead.id, metadata);
     }
   } catch (error: unknown) {
     context.report(
@@ -232,7 +237,7 @@ async function recoverBead(
     }
     if (
       (metadata === undefined
-        ? await currentResult(worktreePath, bead.id)
+        ? await currentResult(worktreePath, bead.id, metadata)
         : structuredResult) === undefined
     )
       return false;
@@ -266,6 +271,7 @@ export async function recoverLateCompletions(
   const worktreeGit =
     options.worktreeGit ?? createGitAdapter({ cwd: options.cwd });
   const mergeGit = options.mergeGit ?? new GitMergeAdapter();
+  const readMetadata = options.readMetadata ?? readRecoveryMetadata;
   const [blocked, snapshotResult, worktrees] = await Promise.all([
     beads.listBlocked(),
     herdr.apiSnapshot(),
@@ -296,8 +302,19 @@ export async function recoverLateCompletions(
     const retained = worktrees.find((worktree) => worktree.branch === bead.id);
     const retainedPath =
       retained === undefined ? undefined : resolve(options.cwd, retained.path);
-    if (!(await isLateCommitCandidate(bead, retainedPath))) continue;
-    if (await recoverBead(bead, context)) merged += 1;
+    let metadata: RecoveryMetadata | undefined;
+    if (retainedPath !== undefined) {
+      try {
+        metadata = await readMetadata(retainedPath);
+      } catch (error: unknown) {
+        report(
+          `gis: late completion recovery failed for ${bead.id}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        continue;
+      }
+    }
+    if (!(await isLateCommitCandidate(bead, retainedPath, metadata))) continue;
+    if (await recoverBead(bead, context, metadata)) merged += 1;
   }
   return merged;
 }

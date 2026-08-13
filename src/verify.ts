@@ -9,6 +9,7 @@ import {
   promptWorker,
   type VerificationCycle,
   type WorkerPromptSource,
+  herdrAgentName,
 } from './worker.js';
 
 const execAsync = promisify(exec);
@@ -252,7 +253,7 @@ export async function runVerificationLoop(
     await promptWorker({
       bead: options.bead,
       worktreePath: options.worktreePath,
-      agentName: target,
+      agentName: herdrAgentName(options.bead.id),
       runPath: options.runPath,
       verifyCommand: options.config.verify,
       round: attempt + 1,

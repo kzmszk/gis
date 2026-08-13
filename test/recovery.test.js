@@ -40,7 +40,9 @@ const bead = (id, status = 'in_progress') => ({
   issue_type: 'task',
 });
 
-const snapshot = ({ workspaces = [], panes = [], agents = [] } = {}) => ({
+// Production classification reads snapshot.agents. The pane-to-agent default
+// keeps older fixtures concise without making pane topology authoritative.
+const snapshot = ({ workspaces = [], panes = [], agents = panes } = {}) => ({
   type: 'session_snapshot',
   snapshot: {
     version: '0.7.5',
@@ -428,13 +430,13 @@ test('uses agents fallback only for matching worktrees and complete sessions', a
   assert.equal(fallback.result.classifications[0].classification, 'live');
 
   const differentWorktree = await run(
-    [],
     [
       {
         ...baseAgent,
         workspace_id: 'ws-other',
       },
     ],
+    [],
     [
       workspace,
       {

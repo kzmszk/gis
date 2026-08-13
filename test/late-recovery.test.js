@@ -4,7 +4,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { recoverLateCompletions } from '../dist/late-recovery.js';
-import { writeRecoveryMetadata } from '../dist/recovery-manifest.js';
+import {
+  readRecoveryMetadata,
+  writeRecoveryMetadata,
+} from '../dist/recovery-manifest.js';
 import { herdrAgentName } from '../dist/worker.js';
 import { reconcileStartup } from '../dist/recovery.js';
 
@@ -360,6 +363,45 @@ test('uses structured recovery metadata before legacy notes or prompt text', asy
   assert.ok(mergeGit.calls.some((call) => call[0] === 'merge'));
 });
 
+test('snapshots structured metadata once and reuses it through recovery', async (t) => {
+  const beadId = 'gis-structured-read-once.1';
+  const bead = lateCommitBead(beadId, { notes: undefined });
+  const root = await makeRoot(t);
+  const worktreePath = join(root, 'worktrees', beadId);
+  await mkdir(worktreePath, { recursive: true });
+  await writeStructuredSuccessfulRun(worktreePath, { beadId });
+  let reads = 0;
+  const mergeGit = makeMergeGit({ [worktreePath]: true });
+  const merged = await recoverLateCompletions({
+    cwd: root,
+    config: baseConfig,
+    beads: makeBeadsSource([bead]).source,
+    herdr: makeHerdr([
+      {
+        workspace_id: `ws-${beadId}`,
+        worktree: { checkout_path: worktreePath },
+      },
+    ]).herdr,
+    worktreeGit: makeWorktreeGit([
+      {
+        path: worktreePath,
+        branch: beadId,
+        isBare: false,
+        isDetached: false,
+        isPrunable: false,
+      },
+    ]),
+    mergeGit: mergeGit.mergeGit,
+    runVerify: makeRunVerify(true).runVerify,
+    readMetadata: async (path) => {
+      reads += 1;
+      return readRecoveryMetadata(path);
+    },
+  });
+  assert.equal(merged, 1);
+  assert.equal(reads, 1);
+});
+
 test('routes a completed startup handoff through blocked state and SerialMergeQueue', async (t) => {
   const beadId = 'gis-startup-late.1';
   const root = await makeRoot(t);
@@ -712,6 +754,93 @@ test('retains mismatched structured identity and reports a concrete diagnostic',
     assert.ok(
       reports.some((message) => message.includes(`metadata ${label}`)),
       `${label}: expected identity diagnostic`,
+    );
+  }
+});
+
+test('diagnoses structured path contradictions before workspace or commit gates', async (t) => {
+  const root = await makeRoot(t);
+  const cases = [
+    {
+      label: 'no-workspace-traversal',
+      resultPath: '../../outside.json',
+      workspace: false,
+    },
+    {
+      label: 'no-commits-run-mismatch',
+      resultPath: '.gis/run/result.json',
+      workspace: true,
+    },
+  ];
+  for (const item of cases) {
+    const beadId = `gis-structured-gate-${item.label}`;
+    const bead = lateCommitBead(beadId, { notes: undefined });
+    const worktreePath = join(root, item.label);
+    await mkdir(join(worktreePath, '.gis', 'run'), { recursive: true });
+    if (item.workspace && item.resultPath.endsWith('result.json')) {
+      await writeFile(
+        join(worktreePath, '.gis', 'run', 'result.json'),
+        JSON.stringify({
+          run_id: 'actual-run',
+          status: 'done',
+          summary: 'done',
+        }),
+        'utf8',
+      );
+    }
+    await writeRecoveryMetadata(worktreePath, {
+      version: 1,
+      beadId,
+      agentName: herdrAgentName(beadId),
+      runId: 'expected-run',
+      resultPath: item.resultPath,
+      failureCode: 'ready_to_merge',
+      role: 'implement',
+    });
+    const reports = [];
+    const herdr = makeHerdr(
+      item.workspace
+        ? [
+            {
+              workspace_id: `ws-${beadId}`,
+              worktree: { checkout_path: worktreePath },
+            },
+          ]
+        : [],
+    );
+    const mergeGit = makeMergeGit({ [worktreePath]: false });
+    const merged = await recoverLateCompletions({
+      cwd: root,
+      config: baseConfig,
+      report: (message) => reports.push(message),
+      beads: makeBeadsSource([bead]).source,
+      herdr: herdr.herdr,
+      worktreeGit: makeWorktreeGit([
+        {
+          path: worktreePath,
+          branch: beadId,
+          isBare: false,
+          isDetached: false,
+          isPrunable: false,
+        },
+      ]),
+      mergeGit: mergeGit.mergeGit,
+      runVerify: makeRunVerify(true).runVerify,
+    });
+    assert.equal(merged, 0, item.label);
+    assert.equal(herdr.calls.length, 0, `${item.label}: worktree retained`);
+    assert.ok(
+      reports.some((message) =>
+        item.workspace
+          ? message.includes('run ID mismatch')
+          : message.includes('escapes worktree'),
+      ),
+      `${item.label}: contradiction should be reported`,
+    );
+    assert.equal(
+      mergeGit.calls.filter((call) => call[0] === 'hasCommits').length,
+      0,
+      `${item.label}: commit gate must not run after contradiction`,
     );
   }
 });

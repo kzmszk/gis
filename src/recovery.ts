@@ -229,7 +229,7 @@ export interface StartupReconciliationReport {
   readonly reopenedIssueIds: readonly string[];
   readonly blockedIssueIds: readonly string[];
   readonly orphanedWorktrees: readonly OrphanedWorktree[];
-  readonly classifications?: readonly RecoveryClassificationRecord[];
+  readonly classifications: readonly RecoveryClassificationRecord[];
 }
 
 export type RecoveryClassification = 'live' | 'completed' | 'stale' | 'unknown';
@@ -282,12 +282,11 @@ export function classifyRecoveryObservation(
   snapshot: SessionSnapshot,
 ): RecoveryClassificationRecord {
   const expectedName = herdrAgentName(beadId);
-  // Pane state is the freshest identity/status observation. Older Herdr
-  // snapshots exposed named records only through the agent index, so retain
-  // that as a compatibility fallback.
-  const candidate =
-    snapshot.panes.find((pane) => pane.name === expectedName) ??
-    snapshot.agents.find((agent) => agent.name === expectedName);
+  // Agent records are the identity/status contract. Panes only establish UI
+  // topology and intentionally cannot make an idle/unknown worker live.
+  const candidate = snapshot.agents.find(
+    (agent) => agent.name === expectedName,
+  );
   if (candidate === undefined) {
     return {
       beadId,
@@ -376,6 +375,10 @@ async function reconcileInProgressBead(
     ({ worktree }) => worktree.branch === bead.id,
   );
   if (retained !== undefined) {
+    // The Herdr snapshot is a point-in-time observation. Only a matching
+    // working agent is left untouched; idle/unknown/stale states are handed
+    // off as blocked while retaining the worktree, so a transient snapshot
+    // cannot trigger destructive cleanup or a false live classification.
     const observation = classifyRecoveryObservation(
       bead.id,
       retained.path,

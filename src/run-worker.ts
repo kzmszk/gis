@@ -638,10 +638,14 @@ async function finishImplementation(
     return { status: 'blocked' };
   } catch (error: unknown) {
     if (error instanceof AlreadyBlockedError) {
+      // This exception originates from the blocked worker wait in a
+      // verification/review retry; retain a non-recoverable wait marker.
       await recordRecoveryFailure(worktree.path, 'worker_wait');
       return { status: 'blocked' };
     }
-    await recordRecoveryFailure(worktree.path, 'verification');
+    // Unknown exceptions must not be mistaken for a verification failure or
+    // become a late-recovery candidate.
+    await recordRecoveryFailure(worktree.path, 'unknown');
     await options.beads.markBlocked(bead.id, await session.currentHandoff());
     return { status: 'blocked' };
   }
