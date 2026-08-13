@@ -14,7 +14,13 @@ import { tmpdir } from 'node:os';
 import { delimiter, join, resolve } from 'node:path';
 import { test } from 'node:test';
 import { promisify } from 'node:util';
-import { parseGitWorktreeList, reconcileStartup } from '../dist/recovery.js';
+import {
+  GitCommandError,
+  GitProtocolError,
+  createGitAdapter,
+  parseGitWorktreeList,
+  reconcileStartup,
+} from '../dist/recovery.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -38,6 +44,99 @@ const snapshot = ({ workspaces = [], panes = [] } = {}) => ({
     layouts: [],
     agents: [],
   },
+});
+
+async function fakeGitScript(t, source) {
+  const directory = await mkdtemp(join(tmpdir(), 'gis-recovery-git-error-'));
+  const command = join(directory, 'git-fake');
+  await writeFile(command, `#!/usr/bin/env node\n${source}\n`, 'utf8');
+  await chmod(command, 0o755);
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  return command;
+}
+
+test('converts a git non-zero exit into GitCommandError with command context', async (t) => {
+  const command = await fakeGitScript(
+    t,
+    "process.stderr.write('fatal: worktree unavailable\\n'); process.exit(23);",
+  );
+
+  await assert.rejects(createGitAdapter(command).listWorktrees(), (error) => {
+    assert.ok(error instanceof GitCommandError);
+    assert.deepEqual(error.args, ['worktree', 'list', '--porcelain']);
+    assert.equal(error.code, 23);
+    assert.equal(error.signal, undefined);
+    assert.equal(error.stderr, 'fatal: worktree unavailable\n');
+    assert.match(
+      error.message,
+      /git command failed \(worktree list --porcelain\)/,
+    );
+    assert.match(error.message, /Command failed/);
+    return true;
+  });
+});
+
+test('retains a signal termination as typed git command context', async (t) => {
+  const command = await fakeGitScript(
+    t,
+    "process.kill(process.pid, 'SIGTERM');",
+  );
+
+  await assert.rejects(createGitAdapter(command).listWorktrees(), (error) => {
+    assert.ok(error instanceof GitCommandError);
+    assert.deepEqual(error.args, ['worktree', 'list', '--porcelain']);
+    assert.equal(error.code, undefined);
+    assert.equal(error.signal, 'SIGTERM');
+    assert.equal(error.stderr, '');
+    return true;
+  });
+});
+
+test('converts an unavailable git executable into a typed string-code error', async () => {
+  await assert.rejects(
+    createGitAdapter('/definitely/missing/gis-git').listWorktrees(),
+    (error) => {
+      assert.ok(error instanceof GitCommandError);
+      assert.deepEqual(error.args, ['worktree', 'list', '--porcelain']);
+      assert.equal(error.code, 'ENOENT');
+      assert.equal(error.signal, undefined);
+      assert.equal(error.stderr, '');
+      return true;
+    },
+  );
+});
+
+test('does not wrap malformed git worktree output as a command error', async (t) => {
+  const command = await fakeGitScript(
+    t,
+    "process.stdout.write('not porcelain');",
+  );
+
+  await assert.rejects(createGitAdapter(command).listWorktrees(), (error) => {
+    assert.ok(error instanceof GitProtocolError);
+    assert.equal(error.name, 'GitProtocolError');
+    assert.match(error.message, /record 0 did not contain a worktree path/);
+    return true;
+  });
+});
+
+test('normalizes optional command error fields without losing stderr bytes', () => {
+  const error = new GitCommandError(
+    ['worktree', 'list', '--porcelain'],
+    Object.assign(new Error(''), {
+      code: true,
+      signal: 9,
+      stderr: Buffer.from('fatal: bytes\n', 'utf8'),
+    }),
+  );
+
+  assert.equal(
+    error.message,
+    'git command failed (worktree list --porcelain): git command failed',
+  );
+  assert.equal(error.code, undefined);
+  assert.equal(error.signal, undefined);
+  assert.equal(error.stderr, 'fatal: bytes\n');
 });
 
 test('blocks an in-progress bead when its retained worktree has no live pane', async () => {
