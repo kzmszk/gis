@@ -56,6 +56,55 @@ export interface MergeQueueOptions {
 
 export type MergeFailurePhase = 'rebase' | 'commit' | 'verify' | 'merge';
 
+export interface CleanupRemovedStage {
+  readonly status: 'removed';
+  /** Number of calls made before this stage completed. */
+  readonly attempts: number;
+}
+
+export interface CleanupDeletedStage {
+  readonly status: 'deleted';
+  /** Number of calls made before this stage completed. */
+  readonly attempts: number;
+}
+
+export interface CleanupFailedStage {
+  readonly status: 'failed';
+  readonly attempts: number;
+  readonly error: unknown;
+}
+
+export interface CleanupNotAttemptedStage {
+  readonly status: 'not_attempted';
+  readonly attempts: 0;
+  /** The worktree must be removed before branch deletion is safe. */
+  readonly reason: 'worktree_failed';
+}
+
+/**
+ * Outcome of the post-merge cleanup, with each side effect represented
+ * independently.  A merged bead is never blocked because of this outcome.
+ */
+export type MergeCleanupOutcome =
+  | {
+      readonly status: 'cleaned';
+      readonly worktree: CleanupRemovedStage;
+      readonly branch: CleanupDeletedStage;
+      readonly remaining: readonly [];
+    }
+  | {
+      readonly status: 'worktree_failed';
+      readonly worktree: CleanupFailedStage;
+      readonly branch: CleanupNotAttemptedStage;
+      readonly remaining: readonly ['worktree', 'branch'];
+    }
+  | {
+      readonly status: 'branch_failed';
+      readonly worktree: CleanupRemovedStage;
+      readonly branch: CleanupFailedStage;
+      readonly remaining: readonly ['branch'];
+    };
+
 export interface MergeBlockedResult {
   readonly status: 'blocked';
   readonly phase: MergeFailurePhase;
@@ -70,7 +119,12 @@ export interface MergeMergedResult {
   readonly bead: Pick<Bead, 'id'>;
   /** Main contains the commit, but closing the Beads issue failed. */
   readonly stateError?: unknown;
-  /** Main and bd are committed, but cleanup needs human/retry attention. */
+  /**
+   * Main and bd are committed; cleanup records each side effect and retry.
+   * Undefined when closing the Beads issue failed before cleanup began.
+   */
+  readonly cleanup?: MergeCleanupOutcome;
+  /** @deprecated Use cleanup.worktree/cleanup.branch instead. */
   readonly cleanupError?: unknown;
 }
 
@@ -402,28 +456,122 @@ export class SerialMergeQueue {
       return { status: 'merged', bead: item.bead, stateError };
     }
 
-    const cleanup = async (): Promise<void> => {
-      await item.worktree.remove();
-      await this.git.deleteBranch(this.options.repositoryPath, item.bead.id);
-    };
-    try {
-      await cleanup();
-      return { status: 'merged', bead };
-    } catch (firstError: unknown) {
-      // A cleanup call can fail after git and bd have already committed the
-      // bead. Retrying is safe because worktree removal is idempotent; most
-      // importantly, never turn an already-closed bead back into blocked.
-      try {
-        await cleanup();
-        return { status: 'merged', bead };
-      } catch (secondError: unknown) {
-        return {
-          status: 'merged',
-          bead,
-          cleanupError: secondError ?? firstError,
-        };
+    // Keep the stage state across retries.  In particular, do not invoke
+    // worktree removal again after it has succeeded: a branch deletion retry
+    // must not turn a successful first stage into a reported failure.
+    let worktreeAttempts = 0;
+    let branchAttempts = 0;
+    let worktreeRemoved = false;
+    let branchDeleted = false;
+
+    const cleanup = async (): Promise<MergeCleanupOutcome> => {
+      if (!worktreeRemoved) {
+        worktreeAttempts += 1;
+        try {
+          await item.worktree.remove();
+          worktreeRemoved = true;
+        } catch (error: unknown) {
+          return {
+            status: 'worktree_failed',
+            worktree: {
+              status: 'failed',
+              attempts: worktreeAttempts,
+              error,
+            },
+            branch: {
+              status: 'not_attempted',
+              attempts: 0,
+              reason: 'worktree_failed',
+            },
+            remaining: ['worktree', 'branch'],
+          };
+        }
       }
+
+      if (!branchDeleted) {
+        branchAttempts += 1;
+        try {
+          await this.git.deleteBranch(
+            this.options.repositoryPath,
+            item.bead.id,
+          );
+          branchDeleted = true;
+        } catch (error: unknown) {
+          return {
+            status: 'branch_failed',
+            worktree: { status: 'removed', attempts: worktreeAttempts },
+            branch: {
+              status: 'failed',
+              attempts: branchAttempts,
+              error,
+            },
+            remaining: ['branch'],
+          };
+        }
+      }
+
+      return {
+        status: 'cleaned',
+        worktree: { status: 'removed', attempts: worktreeAttempts },
+        branch: { status: 'deleted', attempts: branchAttempts },
+        remaining: [],
+      };
+    };
+
+    // A cleanup call can fail after git and bd have already committed the
+    // bead. Retrying is safe because each completed stage is skipped. Most
+    // importantly, never turn an already-closed bead back into blocked.
+    const firstCleanup = await cleanup();
+    if (firstCleanup.status === 'cleaned') {
+      return { status: 'merged', bead, cleanup: firstCleanup };
     }
+    const firstCleanupError =
+      firstCleanup.status === 'worktree_failed'
+        ? firstCleanup.worktree.error
+        : firstCleanup.branch.error;
+    const secondCleanup = await cleanup();
+    if (secondCleanup.status === 'cleaned') {
+      return { status: 'merged', bead, cleanup: secondCleanup };
+    }
+    const secondCleanupError =
+      secondCleanup.status === 'worktree_failed'
+        ? secondCleanup.worktree.error
+        : secondCleanup.branch.error;
+    // Preserve the original `secondError ?? firstError` contract for callers
+    // still reading cleanupError, including when a retry rejects with a
+    // nullish value after a concrete first failure.
+    const cleanupError = secondCleanupError ?? firstCleanupError;
+    const structuredCleanupError =
+      firstCleanup.status === secondCleanup.status &&
+      (secondCleanupError === undefined || secondCleanupError === null) &&
+      firstCleanupError !== undefined &&
+      firstCleanupError !== null
+        ? firstCleanupError
+        : secondCleanupError;
+    const finalCleanup: MergeCleanupOutcome =
+      secondCleanup.status === 'worktree_failed'
+        ? {
+            ...secondCleanup,
+            worktree: {
+              ...secondCleanup.worktree,
+              error: structuredCleanupError,
+            },
+          }
+        : {
+            ...secondCleanup,
+            branch: {
+              ...secondCleanup.branch,
+              error: structuredCleanupError,
+            },
+          };
+    return {
+      status: 'merged',
+      bead,
+      cleanup: finalCleanup,
+      // Keep this deprecated field for callers compiled against the original
+      // result shape; all new reporting is driven by `cleanup` above.
+      cleanupError,
+    };
   }
 
   private blocked(

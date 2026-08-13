@@ -1092,6 +1092,20 @@ test('reports state and cleanup errors surfaced by a merged outcome', async () =
           return {
             status: 'merged',
             stateError: new Error('bd close failed'),
+            cleanup: {
+              status: 'worktree_failed',
+              worktree: {
+                status: 'failed',
+                attempts: 2,
+                error: new Error('worktree remove failed'),
+              },
+              branch: {
+                status: 'not_attempted',
+                attempts: 0,
+                reason: 'worktree_failed',
+              },
+              remaining: ['worktree', 'branch'],
+            },
             cleanupError: new Error('worktree remove failed'),
           };
         },
@@ -1110,8 +1124,219 @@ test('reports state and cleanup errors surfaced by a merged outcome', async () =
       ),
     );
     assert.ok(reports.some((message) => message.includes('cleanup failed')));
+    assert.ok(
+      reports.some((message) =>
+        message.includes('worktree was retained at ' + join(root, 'worktree')),
+      ),
+    );
     assert.equal(markBlockedCalls, 0);
     assert.equal(humanGateCalls, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('keeps the legacy cleanupError-only merge result fallback', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'gis-run-worker-legacy-cleanup-'));
+  const issue = {
+    id: 'gis-vst.legacy-cleanup',
+    title: 'legacy cleanup',
+    description: 'exercise the pre-gis-zjr merge result shape',
+    status: 'open',
+    priority: 2,
+    issue_type: 'task',
+  };
+  const resultPath = join(root, 'result.json');
+  const reports = [];
+  let markBlockedCalls = 0;
+
+  await writeFile(
+    resultPath,
+    JSON.stringify({ status: 'done', summary: 'implemented' }),
+  );
+
+  try {
+    const processor = createBeadJobProcessor({
+      cwd: root,
+      config,
+      beads: {
+        async dispatch() {
+          return { ...issue, status: 'in_progress' };
+        },
+        async markBlocked() {
+          markBlockedCalls += 1;
+          throw new Error('markBlocked must not run on a merged outcome');
+        },
+        async createHumanGate() {
+          throw new Error('human gate must not run');
+        },
+      },
+      herdr: {},
+      worktrees: {
+        async create() {
+          return {
+            beadId: issue.id,
+            path: join(root, 'worktree'),
+            runPath: join(root, 'worktree', '.gis', 'run'),
+            workspaceId: 'workspace',
+            paneId: 'pane',
+            async remove() {},
+          };
+        },
+      },
+      workers: {
+        async start() {
+          return {
+            prompt: { resultPath },
+            started: {},
+            prompted: {},
+          };
+        },
+      },
+      blocked: {
+        async wait() {
+          return { status: 'done', wasBlocked: false, worktreeRetained: true };
+        },
+      },
+      verify: {
+        async verify() {
+          return {
+            status: 'verified',
+            attempts: 1,
+            result: { passed: true, stdout: '' },
+          };
+        },
+      },
+      merge: {
+        async enqueue() {
+          return {
+            status: 'merged',
+            cleanupError: new Error('legacy cleanup failure'),
+          };
+        },
+      },
+      resolveTranscript: async () => undefined,
+      report: (message) => reports.push(message),
+      onHumanGate: () => undefined,
+    });
+
+    assert.deepEqual(await processor(issue), { status: 'merged' });
+    assert.ok(
+      reports.some((message) =>
+        message.includes('cleanup state could not be determined'),
+      ),
+    );
+    assert.equal(markBlockedCalls, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('reports a removed worktree when branch cleanup fails', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'gis-run-worker-branch-cleanup-'));
+  const issue = {
+    id: 'gis-vst.branch-cleanup',
+    title: 'branch cleanup',
+    description: 'report a branch-only cleanup failure accurately',
+    status: 'open',
+    priority: 2,
+    issue_type: 'task',
+  };
+  const resultPath = join(root, 'result.json');
+  const reports = [];
+  let markBlockedCalls = 0;
+
+  await writeFile(
+    resultPath,
+    JSON.stringify({ status: 'done', summary: 'implemented' }),
+  );
+
+  try {
+    const processor = createBeadJobProcessor({
+      cwd: root,
+      config,
+      beads: {
+        async dispatch() {
+          return { ...issue, status: 'in_progress' };
+        },
+        async markBlocked() {
+          markBlockedCalls += 1;
+          throw new Error('markBlocked must not run on a merged outcome');
+        },
+        async createHumanGate() {
+          throw new Error('human gate must not run');
+        },
+      },
+      herdr: {},
+      worktrees: {
+        async create() {
+          return {
+            beadId: issue.id,
+            path: join(root, 'worktree'),
+            runPath: join(root, 'worktree', '.gis', 'run'),
+            workspaceId: 'workspace',
+            paneId: 'pane',
+            async remove() {},
+          };
+        },
+      },
+      workers: {
+        async start() {
+          return {
+            prompt: { resultPath },
+            started: {},
+            prompted: {},
+          };
+        },
+      },
+      blocked: {
+        async wait() {
+          return { status: 'done', wasBlocked: false, worktreeRetained: true };
+        },
+      },
+      verify: {
+        async verify() {
+          return {
+            status: 'verified',
+            attempts: 1,
+            result: { passed: true, stdout: '' },
+          };
+        },
+      },
+      merge: {
+        async enqueue() {
+          return {
+            status: 'merged',
+            cleanup: {
+              status: 'branch_failed',
+              worktree: { status: 'removed', attempts: 1 },
+              branch: {
+                status: 'failed',
+                attempts: 2,
+                error: new Error('branch deletion failed'),
+              },
+              remaining: ['branch'],
+            },
+            cleanupError: new Error('branch deletion failed'),
+          };
+        },
+      },
+      resolveTranscript: async () => undefined,
+      report: (message) => reports.push(message),
+      onHumanGate: () => undefined,
+    });
+
+    assert.deepEqual(await processor(issue), { status: 'merged' });
+    assert.ok(
+      reports.some((message) =>
+        message.includes('the worktree was removed but branch deletion failed'),
+      ),
+    );
+    assert.ok(reports.some((message) => message.includes(issue.id)));
+    assert.ok(
+      reports.every((message) => !message.includes('worktree was retained')),
+    );
+    assert.equal(markBlockedCalls, 0);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
