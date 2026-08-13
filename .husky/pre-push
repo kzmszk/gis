@@ -37,9 +37,31 @@ elif command -v gtimeout >/dev/null 2>&1; then
 else
   out=$(bd dolt push 2>&1); code=$?
 fi
-if [ $code -ne 0 ]; then
-  echo >&2 "beads: could not sync the issue database to $1:"
-  echo >&2 "$out" | sed 's/^/  /'
-  echo >&2 "beads: the bead state stays local until 'bd dolt push' succeeds."
+guard="$(git rev-parse --show-toplevel)/scripts/beads-sync-guard.sh"
+if [ $code -eq 0 ]; then
+  [ -f "$guard" ] && sh "$guard" success
+  exit 0
 fi
-exit 0
+
+echo >&2 "beads: could not sync the issue database to $1:"
+echo >&2 "$out" | sed 's/^/  /'
+
+# One warning was the whole bug. An offline push should still go through, so
+# the first failures stay advisory — but they are counted, and once the count
+# says this is not a passing network blip, the push stops rather than letting
+# the two sides drift further apart in silence. See gis-apr.
+[ -f "$guard" ] || exit 0
+fails=$(sh "$guard" failure "$out")
+limit=${BEADS_PUSH_FAIL_LIMIT:-3}
+if [ "$fails" -lt "$limit" ] || [ "${BEADS_ALLOW_UNSYNCED:-}" = 1 ]; then
+  echo >&2 "beads: the bead state stays local until 'bd dolt push' succeeds ($fails/$limit)."
+  exit 0
+fi
+
+echo >&2 "beads: STOPPING THE PUSH — that is $fails failures in a row."
+echo >&2 "beads: the code would land on the remote while the issues behind it stay"
+echo >&2 "beads: on this machine only, and every further commit widens the gap."
+echo >&2 "beads: run 'bd dolt pull' and then 'DOLT_REMOTE_INFO_BRANCH= bd dolt push'."
+echo >&2 "beads: if the pull reports a merge conflict, stop and report it."
+echo >&2 "beads: to push the code anyway: BEADS_ALLOW_UNSYNCED=1 git push ..."
+exit 1
