@@ -6,7 +6,7 @@ import {
   startWithProfileFallback,
   type ProfileStartResult,
 } from './profiles.js';
-import { requireNonEmpty, resultSchemaIssues } from './internal.js';
+import { requireNonEmpty, validateResultSchema } from './internal.js';
 import { type PaneSplitOptions, type PaneSplitResult } from './herdr.js';
 import {
   startWorker,
@@ -237,16 +237,18 @@ export async function promptReviewer(
 }
 
 function schemaIssues(value: unknown): string[] {
-  const issues = resultSchemaIssues(value, 'review result');
-  if (
-    issues.length > 0 &&
-    (value === null || typeof value !== 'object' || Array.isArray(value))
-  ) {
-    return issues;
-  }
-  const record = value as Record<string, unknown>;
+  const validation = validateResultSchema(value, 'review result');
+  if (validation.kind === 'not_object') return [validation.issue];
+  const { record } = validation;
+  const issues: string[] = [];
   if (typeof record.run_id !== 'string' || record.run_id.trim().length === 0) {
     issues.push('run_id must be a non-empty string');
+  }
+  if (validation.statusIssue !== undefined) {
+    issues.push(validation.statusIssue);
+  }
+  if (validation.summaryIssue !== undefined) {
+    issues.push(validation.summaryIssue);
   }
   if (record.verdict !== 'approved' && record.verdict !== 'changes_requested') {
     issues.push('verdict must be "approved" or "changes_requested"');
@@ -256,6 +258,9 @@ function schemaIssues(value: unknown): string[] {
     (typeof record.feedback !== 'string' || record.feedback.trim().length === 0)
   ) {
     issues.push('feedback must be a non-empty string when present');
+  }
+  if (validation.humanReasonIssue !== undefined) {
+    issues.push(validation.humanReasonIssue);
   }
   return issues;
 }

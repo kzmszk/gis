@@ -108,6 +108,9 @@ export function requestedChangesFeedback(
  * Poll `read` until it reports a state other than "not written yet"
  * (missing/stale), or until `timeout` elapses. On timeout the last
  * missing/stale state is returned as-is so callers can report it.
+ *
+ * @internal Exported only for deterministic timer testing. Production code
+ * outside this module must use the role-specific wait functions below.
  */
 export async function pollUntilTerminal<T extends { readonly kind: string }>(
   read: () => Promise<T>,

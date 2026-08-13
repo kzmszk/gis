@@ -1,5 +1,5 @@
 import { readFile } from 'node:fs/promises';
-import { requireNonEmpty, resultSchemaIssues } from './internal.js';
+import { requireNonEmpty, validateResultSchema } from './internal.js';
 
 export type WorkerResultStatus = 'done' | 'failed';
 
@@ -75,7 +75,13 @@ export function workerResultProblemDetail(result: WorkerResultProblem): string {
 }
 
 function schemaIssues(value: unknown): string[] {
-  return resultSchemaIssues(value, 'result');
+  const validation = validateResultSchema(value, 'result');
+  if (validation.kind === 'not_object') return [validation.issue];
+  return [
+    validation.statusIssue,
+    validation.summaryIssue,
+    validation.humanReasonIssue,
+  ].filter((issue): issue is string => issue !== undefined);
 }
 
 function asWorkerResult(value: Record<string, unknown>): WorkerResult {

@@ -53,14 +53,31 @@ function humanReasonIssue(record: Record<string, unknown>): string | undefined {
     : 'needs_human must be a non-empty string when present';
 }
 
-/** Validate the common worker/reviewer result protocol fields. */
-export function resultSchemaIssues(value: unknown, label: string): string[] {
-  if (!isRecord(value)) return [`${label} must be a JSON object`];
-  return [
-    statusIssue(value),
-    summaryIssue(value),
-    humanReasonIssue(value),
-  ].filter((issue): issue is string => issue !== undefined);
+export type ResultSchemaValidation =
+  | { readonly kind: 'not_object'; readonly issue: string }
+  | {
+      readonly kind: 'record';
+      readonly record: Record<string, unknown>;
+      readonly statusIssue?: string;
+      readonly summaryIssue?: string;
+      readonly humanReasonIssue?: string;
+    };
+
+/** Validate and narrow the fields shared by worker and reviewer results. */
+export function validateResultSchema(
+  value: unknown,
+  label: string,
+): ResultSchemaValidation {
+  if (!isRecord(value)) {
+    return { kind: 'not_object', issue: `${label} must be a JSON object` };
+  }
+  return {
+    kind: 'record',
+    record: value,
+    statusIssue: statusIssue(value),
+    summaryIssue: summaryIssue(value),
+    humanReasonIssue: humanReasonIssue(value),
+  };
 }
 
 /** Suspend asynchronous control flow without coupling callers to timers. */
