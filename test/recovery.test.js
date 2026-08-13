@@ -46,12 +46,17 @@ const snapshot = ({ workspaces = [], panes = [] } = {}) => ({
   },
 });
 
-async function fakeGitScript(t, source) {
-  const directory = await mkdtemp(join(tmpdir(), 'gis-recovery-git-error-'));
-  const command = join(directory, 'git-fake');
+async function fakeGitScript(t, source, options = {}) {
+  const ownsDirectory = options.directory === undefined;
+  const directory =
+    options.directory ??
+    (await mkdtemp(join(tmpdir(), 'gis-recovery-git-error-')));
+  const command = join(directory, options.name ?? 'git-fake');
   await writeFile(command, `#!/usr/bin/env node\n${source}\n`, 'utf8');
   await chmod(command, 0o755);
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  if (ownsDirectory) {
+    t.after(() => rm(directory, { recursive: true, force: true }));
+  }
   return command;
 }
 
@@ -71,9 +76,37 @@ test('converts a git non-zero exit into GitCommandError with command context', a
       error.message,
       /git command failed \(worktree list --porcelain\)/,
     );
-    assert.match(error.message, /Command failed/);
+    const details = error.message.replace(
+      'git command failed (worktree list --porcelain): ',
+      '',
+    );
+    assert.ok(details.length > 0);
     return true;
   });
+});
+
+test('converts a non-Error command rejection into GitCommandError', async () => {
+  await assert.rejects(
+    createGitAdapter({
+      command: 'git-test',
+      runCommand: async () => {
+        throw { code: 42, stderr: 'runner failure' };
+      },
+    }).listWorktrees(),
+    (error) => {
+      assert.ok(error instanceof GitCommandError);
+      assert.deepEqual(error.args, ['worktree', 'list', '--porcelain']);
+      assert.equal(error.code, 42);
+      assert.equal(error.signal, undefined);
+      assert.equal(error.stderr, 'runner failure');
+      assert.match(
+        error.message,
+        /git command failed \(worktree list --porcelain\)/,
+      );
+      assert.match(error.message, /\[object Object\]/);
+      return true;
+    },
+  );
 });
 
 test('retains a signal termination as typed git command context', async (t) => {
@@ -325,7 +358,7 @@ branch refs/heads/gis-vst.14
   );
 });
 
-test('gis run performs startup reconciliation before dispatch', async () => {
+test('gis run performs startup reconciliation before dispatch', async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'gis-recovery-cli-'));
   const binDirectory = join(directory, 'bin');
   const logPath = join(directory, 'bd.log');
@@ -358,18 +391,16 @@ process.stdout.write(JSON.stringify([bead]) + "\\n");
 `,
     'utf8',
   );
-  await writeFile(
-    join(binDirectory, 'git'),
-    `#!/usr/bin/env node
-process.stdout.write(\`worktree \${process.env.GIS_WORKTREE_PATH}
+  await fakeGitScript(
+    t,
+    `process.stdout.write(\`worktree \${process.env.GIS_WORKTREE_PATH}
 HEAD abc
 branch refs/heads/gis-vst.14
 \`);
 `,
-    'utf8',
+    { directory: binDirectory, name: 'git' },
   );
   await chmod(join(binDirectory, 'bd'), 0o755);
-  await chmod(join(binDirectory, 'git'), 0o755);
 
   const server = createServer((socket) => {
     let buffer = '';
