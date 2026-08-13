@@ -5,6 +5,12 @@
 .beads-credential-key
 .beads/proxieddb/
 
+# Passive export of the interaction log. Dolt is the source of truth and syncs
+# via refs/dolt/data, so tracking this only dirties the tree on every bd
+# command. .beads/.gitignore already ignores issues.jsonl for the same reason;
+# this lives here because bd rewrites that file on upgrade.
+.beads/interactions.jsonl
+
 # gis runtime artifacts
 .gis/run/
 
