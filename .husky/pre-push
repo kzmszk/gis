@@ -19,6 +19,15 @@ target=$(git remote get-url "$1" 2>/dev/null || echo "$1")
 origin=$(git remote get-url origin 2>/dev/null || echo)
 [ -n "$origin" ] && [ "$target" = "$origin" ] || exit 0
 
+# Suppress the marker branch. Alongside the data at refs/dolt/data, dolt
+# force-pushes a human-readable branch holding a single DOLT_REMOTE.md — at
+# refs/heads/__dolt_remote_info__, so GitHub treats it as a real branch and
+# shows a "had recent pushes" banner after every push. Setting the branch
+# name to empty disables that push entirely (dolt's ResolveInfoBranch); the
+# data plane is untouched, since it never rides on this ref. Exported so any
+# bd invocation below inherits it. See gis-v3t.
+export DOLT_REMOTE_INFO_BRANCH=
+
 # Bounded: a black-holed network must not hang the push. Warn rather than
 # fail — being offline should not block a push, and the next one retries.
 if command -v timeout >/dev/null 2>&1; then

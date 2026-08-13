@@ -23,6 +23,14 @@ bd close <id>         # Complete work
 bd dolt push          # Push beads data to remote
 ```
 
+**Always run `bd dolt push` with `DOLT_REMOTE_INFO_BRANCH=` set to empty.**
+Otherwise dolt also force-pushes a marker branch to
+`refs/heads/__dolt_remote_info__`, which GitHub counts as a real branch and
+turns into a "had recent pushes" banner on every visit. The empty value
+disables that push; the issue data at `refs/dolt/data` is unaffected. The
+pre-push hook already exports it — set it in your shell profile (and in any
+cloud routine or second machine) so manual pushes match. See gis-v3t.
+
 ## Non-Interactive Shell Commands
 
 **ALWAYS use non-interactive flags** with file operations to avoid hanging on confirmation prompts.
