@@ -110,9 +110,11 @@ test('does not re-block a closed bead when cleanup fails after merge', async () 
 });
 
 test('preserves the first cleanup error when a retry rejects with a nullish value', async () => {
+  const events = [];
+  const base = options(events);
   let removeCalls = 0;
-  const result = await new SerialMergeQueue(options([])).enqueue({
-    ...item('gis-vst.cleanup-nullish', []),
+  const result = await new SerialMergeQueue(base).enqueue({
+    ...item('gis-vst.cleanup-nullish', events),
     worktree: {
       path: '/repo/.worktrees/gis-vst.cleanup-nullish',
       runPath: '/repo/.worktrees/gis-vst.cleanup-nullish/.gis/run',
@@ -127,22 +129,23 @@ test('preserves the first cleanup error when a retry rejects with a nullish valu
   assert.equal(result.status, 'merged');
   assert.equal(result.cleanup?.status, 'worktree_failed');
   assert.match(String(result.cleanupError), /first cleanup failure/);
+  assert.match(String(result.cleanup?.worktree.error), /first cleanup failure/);
   assert.equal(result.cleanup?.worktree.attempts, 2);
 });
 
 test('reports a failed worktree removal separately and does not attempt branch deletion', async () => {
   const events = [];
+  const base = options(events);
   let deleteCalls = 0;
-  const result = await new SerialMergeQueue(
-    options(events, {
-      git: {
-        ...options(events).git,
-        async deleteBranch() {
-          deleteCalls += 1;
-        },
+  const result = await new SerialMergeQueue({
+    ...base,
+    git: {
+      ...base.git,
+      async deleteBranch() {
+        deleteCalls += 1;
       },
-    }),
-  ).enqueue({
+    },
+  }).enqueue({
     ...item('gis-vst.cleanup-worktree', events),
     worktree: {
       path: '/repo/.worktrees/gis-vst.cleanup-worktree',
@@ -165,19 +168,19 @@ test('reports a failed worktree removal separately and does not attempt branch d
 
 test('reports branch deletion failure after worktree removal without retrying removal', async () => {
   const events = [];
+  const base = options(events);
   let removeCalls = 0;
   let deleteCalls = 0;
-  const result = await new SerialMergeQueue(
-    options(events, {
-      git: {
-        ...options(events).git,
-        async deleteBranch() {
-          deleteCalls += 1;
-          throw new Error('branch is locked');
-        },
+  const result = await new SerialMergeQueue({
+    ...base,
+    git: {
+      ...base.git,
+      async deleteBranch() {
+        deleteCalls += 1;
+        throw new Error('branch is locked');
       },
-    }),
-  ).enqueue({
+    },
+  }).enqueue({
     ...item('gis-vst.cleanup-branch', events),
     worktree: {
       path: '/repo/.worktrees/gis-vst.cleanup-branch',
@@ -200,20 +203,44 @@ test('reports branch deletion failure after worktree removal without retrying re
   assert.equal(deleteCalls, 2);
 });
 
+test('preserves a same-stage branch error when the branch retry rejects nullish', async () => {
+  const events = [];
+  const base = options(events);
+  let deleteCalls = 0;
+  const result = await new SerialMergeQueue({
+    ...base,
+    git: {
+      ...base.git,
+      async deleteBranch() {
+        deleteCalls += 1;
+        if (deleteCalls === 1) throw new Error('first branch failure');
+        throw null;
+      },
+    },
+  }).enqueue(item('gis-vst.cleanup-branch-nullish', events));
+
+  assert.equal(result.status, 'merged');
+  assert.equal(result.cleanup?.status, 'branch_failed');
+  assert.equal(result.cleanup?.branch.attempts, 2);
+  assert.match(String(result.cleanup?.branch.error), /first branch failure/);
+  assert.match(String(result.cleanupError), /first branch failure/);
+  assert.equal(deleteCalls, 2);
+});
+
 test('retries only incomplete cleanup stages and converges after a transient worktree failure', async () => {
   const events = [];
+  const base = options(events);
   let removeCalls = 0;
   let deleteCalls = 0;
-  const result = await new SerialMergeQueue(
-    options(events, {
-      git: {
-        ...options(events).git,
-        async deleteBranch() {
-          deleteCalls += 1;
-        },
+  const result = await new SerialMergeQueue({
+    ...base,
+    git: {
+      ...base.git,
+      async deleteBranch() {
+        deleteCalls += 1;
       },
-    }),
-  ).enqueue({
+    },
+  }).enqueue({
     ...item('gis-vst.cleanup-retry', events),
     worktree: {
       path: '/repo/.worktrees/gis-vst.cleanup-retry',
@@ -239,24 +266,23 @@ test('reports a compound cleanup failure after worktree retry without re-blockin
   let deleteCalls = 0;
   let blockedCalls = 0;
   const base = options(events);
-  const result = await new SerialMergeQueue(
-    options(events, {
-      beads: {
-        ...base.beads,
-        async markBlocked() {
-          blockedCalls += 1;
-          throw new Error('must not re-block a merged bead');
-        },
+  const result = await new SerialMergeQueue({
+    ...base,
+    beads: {
+      ...base.beads,
+      async markBlocked() {
+        blockedCalls += 1;
+        throw new Error('must not re-block a merged bead');
       },
-      git: {
-        ...base.git,
-        async deleteBranch() {
-          deleteCalls += 1;
-          throw new Error('branch deletion failed');
-        },
+    },
+    git: {
+      ...base.git,
+      async deleteBranch() {
+        deleteCalls += 1;
+        throw null;
       },
-    }),
-  ).enqueue({
+    },
+  }).enqueue({
     ...item('gis-vst.cleanup-compound', events),
     worktree: {
       path: '/repo/.worktrees/gis-vst.cleanup-compound',
@@ -274,8 +300,9 @@ test('reports a compound cleanup failure after worktree retry without re-blockin
   assert.equal(result.cleanup?.worktree.attempts, 2);
   assert.equal(result.cleanup?.branch.status, 'failed');
   assert.equal(result.cleanup?.branch.attempts, 1);
+  assert.equal(result.cleanup?.branch.error, null);
   assert.deepEqual(result.cleanup?.remaining, ['branch']);
-  assert.match(String(result.cleanupError), /branch deletion failed/);
+  assert.match(String(result.cleanupError), /worktree busy/);
   assert.equal(removeCalls, 2);
   assert.equal(deleteCalls, 1);
   assert.equal(blockedCalls, 0);

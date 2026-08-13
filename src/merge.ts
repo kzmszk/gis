@@ -56,9 +56,6 @@ export interface MergeQueueOptions {
 
 export type MergeFailurePhase = 'rebase' | 'commit' | 'verify' | 'merge';
 
-/** A side effect that still needs to be performed during cleanup. */
-export type CleanupTarget = 'worktree' | 'branch';
-
 export interface CleanupRemovedStage {
   readonly status: 'removed';
   /** Number of calls made before this stage completed. */
@@ -544,10 +541,33 @@ export class SerialMergeQueue {
     // still reading cleanupError, including when a retry rejects with a
     // nullish value after a concrete first failure.
     const cleanupError = secondCleanupError ?? firstCleanupError;
+    const structuredCleanupError =
+      firstCleanup.status === secondCleanup.status &&
+      (secondCleanupError === undefined || secondCleanupError === null) &&
+      firstCleanupError !== undefined &&
+      firstCleanupError !== null
+        ? firstCleanupError
+        : secondCleanupError;
+    const finalCleanup: MergeCleanupOutcome =
+      secondCleanup.status === 'worktree_failed'
+        ? {
+            ...secondCleanup,
+            worktree: {
+              ...secondCleanup.worktree,
+              error: structuredCleanupError,
+            },
+          }
+        : {
+            ...secondCleanup,
+            branch: {
+              ...secondCleanup.branch,
+              error: structuredCleanupError,
+            },
+          };
     return {
       status: 'merged',
       bead,
-      cleanup: secondCleanup,
+      cleanup: finalCleanup,
       // Keep this deprecated field for callers compiled against the original
       // result shape; all new reporting is driven by `cleanup` above.
       cleanupError,
