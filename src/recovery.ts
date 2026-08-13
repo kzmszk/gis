@@ -5,6 +5,7 @@ import type { Bead, BeadHandoffLocations } from './beads.js';
 import { createBeadsAdapter } from './beads.js';
 import type { SessionSnapshot, SessionSnapshotResult } from './herdr.js';
 import { createHerdrAdapter } from './herdr.js';
+import { herdrAgentName } from './worker.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -228,6 +229,16 @@ export interface StartupReconciliationReport {
   readonly reopenedIssueIds: readonly string[];
   readonly blockedIssueIds: readonly string[];
   readonly orphanedWorktrees: readonly OrphanedWorktree[];
+  readonly classifications: readonly RecoveryClassificationRecord[];
+}
+
+export type RecoveryClassification = 'live' | 'completed' | 'stale' | 'unknown';
+
+export interface RecoveryClassificationRecord {
+  readonly beadId: string;
+  readonly worktreePath: string;
+  readonly classification: RecoveryClassification;
+  readonly reason: string;
 }
 
 export interface StartupReconciliationOptions {
@@ -237,44 +248,6 @@ export interface StartupReconciliationOptions {
   readonly herdr?: HerdrRecoverySource;
   readonly git?: GitRecoverySource;
   readonly report?: (message: string) => void;
-}
-
-function pathFrom(value: unknown, cwd: string): string | undefined {
-  return typeof value === 'string' && value.length > 0
-    ? resolve(cwd, value)
-    : undefined;
-}
-
-function liveWorktreePaths(
-  snapshot: SessionSnapshot,
-  cwd: string,
-): Set<string> {
-  const paneWorkspaceIds = new Set(
-    snapshot.panes.map((pane) => pane.workspace_id),
-  );
-  const paths = new Set<string>();
-
-  for (const workspace of snapshot.workspaces) {
-    if (!paneWorkspaceIds.has(workspace.workspace_id)) {
-      continue;
-    }
-    const checkoutPath = workspace.worktree?.checkout_path;
-    const normalized = pathFrom(checkoutPath, cwd);
-    if (normalized !== undefined) {
-      paths.add(normalized);
-    }
-  }
-
-  for (const pane of snapshot.panes) {
-    for (const candidate of [pane.cwd, pane.foreground_cwd]) {
-      const normalized = pathFrom(candidate, cwd);
-      if (normalized !== undefined) {
-        paths.add(normalized);
-      }
-    }
-  }
-
-  return paths;
 }
 
 function normalizeWorktreePath(worktree: GitWorktree, cwd: string): string {
@@ -297,9 +270,92 @@ interface NormalizedWorktree {
 
 interface InProgressReconciliationContext {
   readonly normalizedWorktrees: readonly NormalizedWorktree[];
-  readonly livePaths: ReadonlySet<string>;
   readonly beads: BeadsRecoverySource;
   readonly report: (message: string) => void;
+  readonly snapshot: SessionSnapshot;
+  readonly classifications: RecoveryClassificationRecord[];
+}
+
+export function classifyRecoveryObservation(
+  beadId: string,
+  worktreePath: string,
+  snapshot: SessionSnapshot,
+): RecoveryClassificationRecord {
+  const expectedName = herdrAgentName(beadId);
+  // Agent records are the identity/status contract. Panes only establish UI
+  // topology and intentionally cannot make an idle/unknown worker live.
+  const candidate = snapshot.agents.find(
+    (agent) => agent.name === expectedName,
+  );
+  if (candidate === undefined) {
+    return {
+      beadId,
+      worktreePath,
+      classification: 'unknown',
+      reason: `agent ${expectedName} was not found`,
+    };
+  }
+  const workspace = snapshot.workspaces.find(
+    (item) => item.workspace_id === candidate.workspace_id,
+  );
+  const checkout = workspace?.worktree?.checkout_path;
+  if (checkout === undefined || resolve(checkout) !== resolve(worktreePath)) {
+    return {
+      beadId,
+      worktreePath,
+      classification: 'unknown',
+      reason: 'agent is attached to a different worktree',
+    };
+  }
+  const session = candidate.agent_session;
+  if (
+    session === undefined ||
+    session === null ||
+    typeof session.agent !== 'string' ||
+    session.agent.trim().length === 0 ||
+    typeof session.value !== 'string' ||
+    session.value.trim().length === 0
+  ) {
+    return {
+      beadId,
+      worktreePath,
+      classification: 'unknown',
+      reason: 'agent has no session identity',
+    };
+  }
+  if (candidate.agent_status === 'working') {
+    return {
+      beadId,
+      worktreePath,
+      classification: 'live',
+      reason: 'matching agent session is working',
+    };
+  }
+  if (candidate.agent_status === 'done') {
+    return {
+      beadId,
+      worktreePath,
+      classification: 'completed',
+      reason: 'matching agent session is done',
+    };
+  }
+  if (
+    candidate.agent_status === 'idle' ||
+    candidate.agent_status === 'blocked'
+  ) {
+    return {
+      beadId,
+      worktreePath,
+      classification: 'stale',
+      reason: `matching agent session is ${candidate.agent_status}`,
+    };
+  }
+  return {
+    beadId,
+    worktreePath,
+    classification: 'unknown',
+    reason: 'agent status is unknown',
+  };
 }
 
 /** What `reconcileInProgressBead` observed and did for one in-progress bead. */
@@ -315,28 +371,47 @@ async function reconcileInProgressBead(
   bead: Bead,
   context: InProgressReconciliationContext,
 ): Promise<InProgressReconciliationOutcome> {
-  const hasLivePane = context.normalizedWorktrees.some(
-    ({ worktree, path }) =>
-      worktree.branch === bead.id && context.livePaths.has(path),
-  );
-  if (hasLivePane) {
-    return 'live';
-  }
-
   const retained = context.normalizedWorktrees.find(
     ({ worktree }) => worktree.branch === bead.id,
   );
   if (retained !== undefined) {
+    // The Herdr snapshot is a point-in-time observation. Only a matching
+    // working agent is left untouched; idle/unknown/stale states are handed
+    // off as blocked while retaining the worktree, so a transient snapshot
+    // cannot trigger destructive cleanup or a false live classification.
+    const observation = classifyRecoveryObservation(
+      bead.id,
+      retained.path,
+      context.snapshot,
+    );
+    context.classifications.push(observation);
+    if (observation.classification === 'live') return 'live';
+    if (observation.classification === 'completed') {
+      const runPath = join(retained.path, '.gis', 'run');
+      await context.beads.markBlocked(bead.id, {
+        worktreePath: retained.path,
+        roundLogPath: runPath,
+        transcriptPath: join(runPath, 'transcript-recovery.unresolved'),
+        failurePhase: 'startup recovery',
+        failureDetail:
+          'completed: worker finished; handing off to late recovery queue',
+      });
+      context.report(
+        `completed worker for ${bead.id} retained at ${retained.path}; blocked for late recovery`,
+      );
+      return 'blocked';
+    }
     const runPath = join(retained.path, '.gis', 'run');
     await context.beads.markBlocked(bead.id, {
       worktreePath: retained.path,
       roundLogPath: runPath,
       transcriptPath: join(runPath, 'transcript-recovery.unresolved'),
       failurePhase: 'startup recovery',
-      failureDetail: 'worktree exists but no live herdr pane was found',
+      failureDetail: `${observation.classification}: ${observation.reason}`,
     });
     context.report(
-      `retained worktree ${retained.path} for ${bead.id} has no live pane; marked blocked`,
+      `retained worktree ${retained.path} for ${bead.id} has no live pane ` +
+        `(${observation.classification}: ${observation.reason}); marked blocked`,
     );
     return 'blocked';
   }
@@ -347,9 +422,10 @@ async function reconcileInProgressBead(
 
 interface OrphanDetectionContext {
   readonly baseBranch: string;
-  readonly livePaths: ReadonlySet<string>;
   readonly inProgressIds: ReadonlySet<string>;
   readonly report: (message: string) => void;
+  readonly snapshot: SessionSnapshot;
+  readonly classifications: RecoveryClassificationRecord[];
 }
 
 /** Return a live worker worktree that no in-progress bead still claims. */
@@ -358,10 +434,7 @@ function collectOrphanedWorktree(
   path: string,
   context: OrphanDetectionContext,
 ): OrphanedWorktree | undefined {
-  if (
-    !isWorkerWorktree(worktree, context.baseBranch) ||
-    !context.livePaths.has(path)
-  ) {
+  if (!isWorkerWorktree(worktree, context.baseBranch)) {
     return undefined;
   }
   const branch = worktree.branch!;
@@ -369,6 +442,13 @@ function collectOrphanedWorktree(
     return undefined;
   }
 
+  const observation = classifyRecoveryObservation(
+    branch,
+    path,
+    context.snapshot,
+  );
+  context.classifications.push(observation);
+  if (observation.classification !== 'live') return undefined;
   context.report(
     `orphaned live pane for worktree ${path} (branch ${branch}); leaving it in place for human review`,
   );
@@ -391,7 +471,6 @@ export async function reconcileStartup(
     git.listWorktrees(),
     beads.listInProgress(),
   ]);
-  const livePaths = liveWorktreePaths(snapshotResult.snapshot, cwd);
   const normalizedWorktrees = worktrees.map((worktree) => ({
     worktree,
     path: normalizeWorktreePath(worktree, cwd),
@@ -401,9 +480,10 @@ export async function reconcileStartup(
   const blockedIssueIds: string[] = [];
   const inProgressContext: InProgressReconciliationContext = {
     normalizedWorktrees,
-    livePaths,
     beads,
     report,
+    snapshot: snapshotResult.snapshot,
+    classifications: [],
   };
 
   for (const bead of inProgress) {
@@ -418,9 +498,10 @@ export async function reconcileStartup(
   const orphanedWorktrees: OrphanedWorktree[] = [];
   const orphanContext: OrphanDetectionContext = {
     baseBranch,
-    livePaths,
     inProgressIds,
     report,
+    snapshot: snapshotResult.snapshot,
+    classifications: inProgressContext.classifications,
   };
   for (const { worktree, path } of normalizedWorktrees) {
     const orphan = collectOrphanedWorktree(worktree, path, orphanContext);
@@ -429,7 +510,12 @@ export async function reconcileStartup(
     }
   }
 
-  return { reopenedIssueIds, blockedIssueIds, orphanedWorktrees };
+  return {
+    reopenedIssueIds,
+    blockedIssueIds,
+    orphanedWorktrees,
+    classifications: inProgressContext.classifications,
+  };
 }
 
 export const reconcileRecovery = reconcileStartup;

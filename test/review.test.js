@@ -3,8 +3,12 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import {
+  recoveryMetadataPath,
+  writeRecoveryMetadata,
+} from '../dist/recovery-manifest.js';
 import { DEFAULT_CONFIG } from '../dist/config.js';
-import { WorkerStartupError } from '../dist/worker.js';
+import { WorkerStartupError, herdrAgentName } from '../dist/worker.js';
 import {
   parseReviewResult,
   reviewAgentName,
@@ -611,6 +615,15 @@ test('returns implementation fixes to the original pane and re-reviews the same 
 
   try {
     await mkdir(runPath, { recursive: true });
+    await writeRecoveryMetadata(root, {
+      version: 1,
+      beadId: implementation.id,
+      agentName: herdrAgentName(implementation.id),
+      runId: 'implementation-run',
+      resultPath: '.gis/run/round-1-impl.json',
+      failureCode: 'unknown',
+      role: 'implement',
+    });
     const result = await runForegroundLoop({
       cwd: root,
       config: cfg,
@@ -714,6 +727,10 @@ test('returns implementation fixes to the original pane and re-reviews the same 
         async agentPrompt(target, text) {
           events.push(['prompt', target, text]);
           if (target === reviewerName) {
+            const metadata = JSON.parse(
+              await readFile(recoveryMetadataPath(root), 'utf8'),
+            );
+            assert.notEqual(metadata.failureCode, 'ready_to_merge');
             reviewPrompts += 1;
             await writePromptResult(
               'review',
@@ -776,6 +793,13 @@ test('returns implementation fixes to the original pane and re-reviews the same 
       ).length,
       2,
     );
+    const metadata = JSON.parse(
+      await readFile(recoveryMetadataPath(root), 'utf8'),
+    );
+    assert.equal(metadata.agentName, herdrAgentName(implementation.id));
+    assert.equal(metadata.beadId, implementation.id);
+    assert.equal(metadata.failureCode, 'ready_to_merge');
+    assert.match(metadata.resultPath, /round-2-impl-review-fix.json$/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -842,6 +866,17 @@ for (const scenario of [
         );
       };
 
+      await mkdir(runPath, { recursive: true });
+      await writeRecoveryMetadata(root, {
+        version: 1,
+        beadId: source.id,
+        agentName: 'implementation-agent',
+        runId: 'initial-run',
+        resultPath: '.gis/run/round-1-impl.json',
+        failureCode: 'unknown',
+        role: 'implement',
+      });
+
       const outcome = await runReviewLoop({
         bead: source,
         worktree: {
@@ -892,6 +927,10 @@ for (const scenario of [
           },
           async agentPrompt(target) {
             if (target === reviewerName) {
+              const metadata = JSON.parse(
+                await readFile(recoveryMetadataPath(root), 'utf8'),
+              );
+              assert.notEqual(metadata.failureCode, 'ready_to_merge');
               await writeResult('review', {
                 status: 'done',
                 summary: 'Please fix the reported issue.',
@@ -957,6 +996,13 @@ for (const scenario of [
       assert.equal(outcome, scenario.expectedOutcome);
       assert.equal(blocked.length, 1);
       assert.equal(gates.length, scenario.expectedGates);
+      const metadata = JSON.parse(
+        await readFile(recoveryMetadataPath(root), 'utf8'),
+      );
+      assert.equal(
+        metadata.failureCode,
+        scenario.name === 'needs_human' ? 'human_gate' : 'review_blocked',
+      );
     } finally {
       await rm(root, { recursive: true, force: true });
     }

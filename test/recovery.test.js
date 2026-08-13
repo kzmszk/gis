@@ -7,6 +7,7 @@ import {
   mkdtemp,
   readFile,
   rm,
+  symlink,
   writeFile,
 } from 'node:fs/promises';
 import { createServer } from 'node:net';
@@ -18,9 +19,15 @@ import {
   GitCommandError,
   GitProtocolError,
   createGitAdapter,
+  classifyRecoveryObservation,
   parseGitWorktreeList,
   reconcileStartup,
 } from '../dist/recovery.js';
+import {
+  containedRecoveryPath,
+  parseRecoveryMetadata,
+} from '../dist/recovery-manifest.js';
+import { herdrAgentName } from '../dist/worker.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -33,7 +40,9 @@ const bead = (id, status = 'in_progress') => ({
   issue_type: 'task',
 });
 
-const snapshot = ({ workspaces = [], panes = [] } = {}) => ({
+// Production classification reads snapshot.agents. The pane-to-agent default
+// keeps older fixtures concise without making pane topology authoritative.
+const snapshot = ({ workspaces = [], panes = [], agents = panes } = {}) => ({
   type: 'session_snapshot',
   snapshot: {
     version: '0.7.5',
@@ -42,7 +51,7 @@ const snapshot = ({ workspaces = [], panes = [] } = {}) => ({
     tabs: [],
     panes,
     layouts: [],
-    agents: [],
+    agents,
   },
 });
 
@@ -172,6 +181,78 @@ test('normalizes optional command error fields without losing stderr bytes', () 
   assert.equal(error.stderr, 'fatal: bytes\n');
 });
 
+test('validates versioned recovery metadata and rejects worktree traversal', () => {
+  const valid = {
+    version: 1,
+    beadId: 'gis-vst.14',
+    agentName: 'gis-vst-14',
+    runId: 'run-1',
+    resultPath: '.gis/run/round-1-impl.json',
+    failureCode: 'commit',
+    role: 'implement',
+  };
+  assert.deepEqual(parseRecoveryMetadata(valid), valid);
+  assert.throws(
+    () => parseRecoveryMetadata({ ...valid, version: 2 }),
+    /unsupported recovery metadata version/,
+  );
+  assert.throws(
+    () => parseRecoveryMetadata({ ...valid, runId: '' }),
+    /runId must be a non-empty string/,
+  );
+  assert.throws(
+    () => parseRecoveryMetadata({ ...valid, failureCode: 'made-up' }),
+    /failureCode is invalid/,
+  );
+  assert.throws(
+    () => parseRecoveryMetadata({ ...valid, role: 'review' }),
+    /role must be implement/,
+  );
+  assert.equal(
+    containedRecoveryPath('/repo/worktree', valid.resultPath),
+    '/repo/worktree/.gis/run/round-1-impl.json',
+  );
+  assert.throws(
+    () => containedRecoveryPath('/repo/worktree', '../outside.json'),
+    /escapes worktree/,
+  );
+});
+
+test('contains existing, missing, absolute, and symlinked recovery paths', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'gis-recovery-containment-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, '.gis', 'run'), { recursive: true });
+  const external = await mkdtemp(join(tmpdir(), 'gis-recovery-external-'));
+  t.after(() => rm(external, { recursive: true, force: true }));
+  await writeFile(join(root, '.gis', 'run', 'existing.json'), '{}', 'utf8');
+  await symlink(external, join(root, 'link'), 'dir');
+
+  assert.equal(
+    containedRecoveryPath(root, '.gis/run/existing.json'),
+    join(root, '.gis', 'run', 'existing.json'),
+  );
+  assert.equal(
+    containedRecoveryPath(root, '.gis/run/missing.json'),
+    join(root, '.gis', 'run', 'missing.json'),
+  );
+  assert.equal(
+    containedRecoveryPath(root, join(root, '.gis', 'run', 'absolute.json')),
+    join(root, '.gis', 'run', 'absolute.json'),
+  );
+  assert.throws(
+    () => containedRecoveryPath(root, join(external, 'outside.json')),
+    /escapes worktree/,
+  );
+  assert.throws(
+    () => containedRecoveryPath(root, 'link/existing.json'),
+    /escapes worktree/,
+  );
+  assert.throws(
+    () => containedRecoveryPath(root, 'link/missing.json'),
+    /escapes worktree/,
+  );
+});
+
 test('blocks an in-progress bead when its retained worktree has no live pane', async () => {
   const updates = [];
   const result = await reconcileStartup({
@@ -212,6 +293,257 @@ test('blocks an in-progress bead when its retained worktree has no live pane', a
   assert.deepEqual(result.orphanedWorktrees, []);
 });
 
+test('classifies worker observations by bead identity, session, and status', () => {
+  const beadId = 'gis-vst.14';
+  const worktreePath = '/repo/.worktrees/gis-vst.14';
+  const workspace = {
+    workspace_id: 'ws-worker',
+    label: beadId,
+    worktree: {
+      checkout_path: worktreePath,
+      is_linked_worktree: true,
+      repo_key: 'repo',
+      repo_name: 'gis',
+      repo_root: '/repo',
+    },
+  };
+  const agent = (status, overrides = {}) => ({
+    name: herdrAgentName(beadId),
+    pane_id: 'pane-worker',
+    workspace_id: 'ws-worker',
+    tab_id: 'tab-worker',
+    agent_status: status,
+    agent_session: {
+      source: 'test',
+      agent: 'codex',
+      kind: 'path',
+      value: '/repo/.gis/run/worker.jsonl',
+    },
+    ...overrides,
+  });
+  const statuses = [
+    ['working', 'live'],
+    ['done', 'completed'],
+    ['idle', 'stale'],
+    ['blocked', 'stale'],
+    ['unknown', 'unknown'],
+  ];
+  for (const [status, expected] of statuses) {
+    const result = classifyRecoveryObservation(
+      beadId,
+      worktreePath,
+      snapshot({
+        workspaces: [workspace],
+        panes: [agent(status)],
+      }).snapshot,
+    );
+    assert.equal(result.classification, expected, status);
+  }
+  assert.equal(
+    classifyRecoveryObservation(
+      beadId,
+      worktreePath,
+      snapshot({ workspaces: [workspace], panes: [] }).snapshot,
+    ).classification,
+    'unknown',
+  );
+  assert.equal(
+    classifyRecoveryObservation(
+      beadId,
+      worktreePath,
+      snapshot({
+        workspaces: [workspace],
+        panes: [agent('working', { name: herdrAgentName('other-bead') })],
+      }).snapshot,
+    ).classification,
+    'unknown',
+  );
+  assert.equal(
+    classifyRecoveryObservation(
+      beadId,
+      worktreePath,
+      snapshot({
+        workspaces: [workspace],
+        panes: [agent('working', { agent_session: null })],
+      }).snapshot,
+    ).classification,
+    'unknown',
+  );
+});
+
+test('uses agents fallback only for matching worktrees and complete sessions', async () => {
+  const beadId = 'gis-vst.agents-fallback';
+  const worktree = '/repo/.worktrees/agents-fallback';
+  const workspace = {
+    workspace_id: 'ws-worker',
+    label: beadId,
+    worktree: { checkout_path: worktree },
+  };
+  const baseAgent = {
+    name: herdrAgentName(beadId),
+    pane_id: 'pane-worker',
+    workspace_id: 'ws-worker',
+    tab_id: 'tab-worker',
+    agent_status: 'working',
+    agent_session: {
+      source: 'test',
+      agent: 'codex',
+      kind: 'path',
+      value: '/repo/.gis/run/worker.jsonl',
+    },
+  };
+  const run = async (agents, panes = [], workspaces = [workspace]) => {
+    const updates = [];
+    const result = await reconcileStartup({
+      cwd: '/repo',
+      beads: {
+        listInProgress: async () => [bead(beadId)],
+        update: async (id, update) => {
+          updates.push({ id, update });
+          return bead(id, update.status);
+        },
+        markBlocked: async (id, locations) => {
+          updates.push({ id, locations });
+          return bead(id, 'blocked');
+        },
+      },
+      herdr: {
+        apiSnapshot: async () => snapshot({ workspaces, panes, agents }),
+      },
+      git: {
+        listWorktrees: async () => [
+          {
+            path: worktree,
+            branch: beadId,
+            isBare: false,
+            isDetached: false,
+            isPrunable: false,
+          },
+        ],
+      },
+    });
+    return { result, updates };
+  };
+
+  const fallback = await run([baseAgent]);
+  assert.deepEqual(fallback.result.blockedIssueIds, []);
+  assert.equal(fallback.result.classifications[0].classification, 'live');
+
+  const differentWorktree = await run(
+    [
+      {
+        ...baseAgent,
+        workspace_id: 'ws-other',
+      },
+    ],
+    [],
+    [
+      workspace,
+      {
+        workspace_id: 'ws-other',
+        label: 'other',
+        worktree: { checkout_path: '/repo/.worktrees/other' },
+      },
+    ],
+  );
+  assert.deepEqual(differentWorktree.result.blockedIssueIds, [beadId]);
+  assert.match(
+    differentWorktree.updates[0].locations.failureDetail,
+    /different worktree/,
+  );
+
+  for (const session of [
+    { ...baseAgent.agent_session, agent: '' },
+    { ...baseAgent.agent_session, agent: '   ' },
+    { ...baseAgent.agent_session, value: '' },
+    { ...baseAgent.agent_session, value: '   ' },
+  ]) {
+    const emptySession = await run([{ ...baseAgent, agent_session: session }]);
+    assert.deepEqual(emptySession.result.blockedIssueIds, [beadId]);
+    assert.match(
+      emptySession.updates[0].locations.failureDetail,
+      /no session identity/,
+    );
+  }
+});
+
+test('hands off completed workers to late recovery and blocks stale or unknown workers', async () => {
+  for (const [status, expected] of [
+    ['done', 'blocked'],
+    ['idle', 'blocked'],
+    ['unknown', 'blocked'],
+  ]) {
+    const beadId = `gis-vst.${status}`;
+    const worktree = `/repo/.worktrees/${beadId}`;
+    const updates = [];
+    const result = await reconcileStartup({
+      cwd: '/repo',
+      beads: {
+        listInProgress: async () => [bead(beadId)],
+        update: async (id, update) => {
+          updates.push({ id, update });
+          return bead(id, update.status);
+        },
+        markBlocked: async (id, locations) => {
+          updates.push({ id, locations });
+          return bead(id, 'blocked');
+        },
+      },
+      herdr: {
+        apiSnapshot: async () =>
+          snapshot({
+            workspaces: [
+              {
+                workspace_id: 'ws-worker',
+                label: beadId,
+                worktree: {
+                  checkout_path: worktree,
+                  is_linked_worktree: true,
+                  repo_key: 'repo',
+                  repo_name: 'gis',
+                  repo_root: '/repo',
+                },
+              },
+            ],
+            panes: [
+              {
+                pane_id: 'pane-worker',
+                workspace_id: 'ws-worker',
+                tab_id: 'tab-worker',
+                name: herdrAgentName(beadId),
+                agent_status: status,
+                agent_session: {
+                  source: 'test',
+                  agent: 'codex',
+                  kind: 'path',
+                  value: '/repo/.gis/run/worker.jsonl',
+                },
+              },
+            ],
+          }),
+      },
+      git: {
+        listWorktrees: async () => [
+          {
+            path: worktree,
+            branch: beadId,
+            isBare: false,
+            isDetached: false,
+            isPrunable: false,
+          },
+        ],
+      },
+    });
+    assert.equal(
+      result[
+        expected === 'reopened' ? 'reopenedIssueIds' : 'blockedIssueIds'
+      ][0],
+      beadId,
+    );
+    assert.equal(updates.length, 1);
+  }
+});
+
 test('keeps a live worker and reports a live worktree with no active bead', async () => {
   const warnings = [];
   const updates = [];
@@ -247,6 +579,13 @@ test('keeps a live worker and reports a live worktree with no active bead', asyn
               workspace_id: 'ws-orphan',
               tab_id: 'tab-orphan',
               agent_status: 'working',
+              name: herdrAgentName('unknown-bead'),
+              agent_session: {
+                source: 'test',
+                agent: 'codex',
+                kind: 'path',
+                value: join(worktree, '.gis', 'run', 'worker.jsonl'),
+              },
             },
           ],
         }),
@@ -307,6 +646,13 @@ test('does not reopen an in-progress bead whose pane is tied to its worktree', a
               workspace_id: 'ws-worker',
               tab_id: 'tab-worker',
               agent_status: 'working',
+              name: herdrAgentName('gis-vst.14'),
+              agent_session: {
+                source: 'test',
+                agent: 'codex',
+                kind: 'path',
+                value: join(worktree, '.gis', 'run', 'worker.jsonl'),
+              },
             },
           ],
         }),

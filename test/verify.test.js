@@ -8,6 +8,8 @@ import {
   slopFeedback,
   slopWorsened,
 } from '../dist/verify.js';
+import { recoveryMetadataPath } from '../dist/recovery-manifest.js';
+import { herdrAgentName } from '../dist/worker.js';
 
 const bead = {
   id: 'gis-vst.8',
@@ -102,6 +104,7 @@ test('retries in the same pane and records verification feedback in the next rou
       options({
         worktreePath: root,
         runPath,
+        target: 'override-target',
         runVerify: async (...args) => {
           verifies.push(args);
           attempt += 1;
@@ -133,7 +136,7 @@ test('retries in the same pane and records verification feedback in the next rou
     ]);
     assert.deepEqual(prompts, [
       {
-        target: bead.id,
+        target: 'override-target',
         text: 'Read .gis/run/implement-prompt.md and execute it.',
         promptOptions: { wait: { until: ['working'], timeoutMs: 10_000 } },
       },
@@ -143,6 +146,17 @@ test('retries in the same pane and records verification feedback in the next rou
     assert.match(prompt, /Previous verification failure/);
     assert.match(prompt, /1 failing test/);
     assert.match(prompt, /AssertionError/);
+    const metadata = JSON.parse(
+      await readFile(recoveryMetadataPath(root), 'utf8'),
+    );
+    assert.equal(metadata.beadId, bead.id);
+    assert.equal(metadata.agentName, herdrAgentName(bead.id));
+    assert.equal(metadata.role, 'implement');
+    assert.equal(
+      metadata.resultPath,
+      '.gis/run/round-2-impl-verify-initial-attempt-2.json',
+    );
+    assert.match(metadata.runId, /^[0-9a-f-]{36}$/);
     assert.match(prompt, /round-2-impl-verify-initial-attempt-2\.json/);
   });
 });
