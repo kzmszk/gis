@@ -574,10 +574,26 @@ async function finishImplementation(
             'the worktree was retained for manual reconciliation',
         );
       }
-      if (mergeResult.cleanupError !== undefined) {
+      const cleanup = mergeResult.cleanup;
+      if (cleanup?.status === 'worktree_failed') {
         options.report(
           `gis: cleanup failed for ${bead.id}; main and bd are merged, ` +
-            'but the worktree was retained for manual recovery',
+            `worktree removal failed and the worktree was retained at ${worktree.path}; ` +
+            'retry worktree removal before deleting the branch',
+        );
+      } else if (cleanup?.status === 'branch_failed') {
+        options.report(
+          `gis: cleanup failed for ${bead.id}; main and bd are merged, ` +
+            `the worktree was removed but branch deletion failed; retry deleting branch ${bead.id} ` +
+            'because no worktree remains',
+        );
+      } else if (mergeResult.cleanupError !== undefined) {
+        // Compatibility for merge sources that still return the pre-gis-zjr
+        // result shape. New queue results always use the discriminated
+        // cleanup outcome above.
+        options.report(
+          `gis: cleanup failed for ${bead.id}; main and bd are merged, ` +
+            'but the cleanup state could not be determined for manual recovery',
         );
       }
       return { status: 'merged' };

@@ -109,6 +109,178 @@ test('does not re-block a closed bead when cleanup fails after merge', async () 
   ]);
 });
 
+test('preserves the first cleanup error when a retry rejects with a nullish value', async () => {
+  let removeCalls = 0;
+  const result = await new SerialMergeQueue(options([])).enqueue({
+    ...item('gis-vst.cleanup-nullish', []),
+    worktree: {
+      path: '/repo/.worktrees/gis-vst.cleanup-nullish',
+      runPath: '/repo/.worktrees/gis-vst.cleanup-nullish/.gis/run',
+      async remove() {
+        removeCalls += 1;
+        if (removeCalls === 1) throw new Error('first cleanup failure');
+        throw undefined;
+      },
+    },
+  });
+
+  assert.equal(result.status, 'merged');
+  assert.equal(result.cleanup?.status, 'worktree_failed');
+  assert.match(String(result.cleanupError), /first cleanup failure/);
+  assert.equal(result.cleanup?.worktree.attempts, 2);
+});
+
+test('reports a failed worktree removal separately and does not attempt branch deletion', async () => {
+  const events = [];
+  let deleteCalls = 0;
+  const result = await new SerialMergeQueue(
+    options(events, {
+      git: {
+        ...options(events).git,
+        async deleteBranch() {
+          deleteCalls += 1;
+        },
+      },
+    }),
+  ).enqueue({
+    ...item('gis-vst.cleanup-worktree', events),
+    worktree: {
+      path: '/repo/.worktrees/gis-vst.cleanup-worktree',
+      runPath: '/repo/.worktrees/gis-vst.cleanup-worktree/.gis/run',
+      async remove() {
+        events.push('remove-failed');
+        throw new Error('worktree unavailable');
+      },
+    },
+  });
+
+  assert.equal(result.status, 'merged');
+  assert.equal(result.cleanup?.status, 'worktree_failed');
+  assert.equal(result.cleanup?.worktree.status, 'failed');
+  assert.equal(result.cleanup?.worktree.attempts, 2);
+  assert.equal(result.cleanup?.branch.status, 'not_attempted');
+  assert.deepEqual(result.cleanup?.remaining, ['worktree', 'branch']);
+  assert.equal(deleteCalls, 0);
+});
+
+test('reports branch deletion failure after worktree removal without retrying removal', async () => {
+  const events = [];
+  let removeCalls = 0;
+  let deleteCalls = 0;
+  const result = await new SerialMergeQueue(
+    options(events, {
+      git: {
+        ...options(events).git,
+        async deleteBranch() {
+          deleteCalls += 1;
+          throw new Error('branch is locked');
+        },
+      },
+    }),
+  ).enqueue({
+    ...item('gis-vst.cleanup-branch', events),
+    worktree: {
+      path: '/repo/.worktrees/gis-vst.cleanup-branch',
+      runPath: '/repo/.worktrees/gis-vst.cleanup-branch/.gis/run',
+      async remove() {
+        removeCalls += 1;
+        events.push('remove');
+      },
+    },
+  });
+
+  assert.equal(result.status, 'merged');
+  assert.equal(result.cleanup?.status, 'branch_failed');
+  assert.equal(result.cleanup?.worktree.status, 'removed');
+  assert.equal(result.cleanup?.worktree.attempts, 1);
+  assert.equal(result.cleanup?.branch.status, 'failed');
+  assert.equal(result.cleanup?.branch.attempts, 2);
+  assert.deepEqual(result.cleanup?.remaining, ['branch']);
+  assert.equal(removeCalls, 1);
+  assert.equal(deleteCalls, 2);
+});
+
+test('retries only incomplete cleanup stages and converges after a transient worktree failure', async () => {
+  const events = [];
+  let removeCalls = 0;
+  let deleteCalls = 0;
+  const result = await new SerialMergeQueue(
+    options(events, {
+      git: {
+        ...options(events).git,
+        async deleteBranch() {
+          deleteCalls += 1;
+        },
+      },
+    }),
+  ).enqueue({
+    ...item('gis-vst.cleanup-retry', events),
+    worktree: {
+      path: '/repo/.worktrees/gis-vst.cleanup-retry',
+      runPath: '/repo/.worktrees/gis-vst.cleanup-retry/.gis/run',
+      async remove() {
+        removeCalls += 1;
+        if (removeCalls === 1) throw new Error('worktree busy');
+      },
+    },
+  });
+
+  assert.equal(result.status, 'merged');
+  assert.equal(result.cleanup?.status, 'cleaned');
+  assert.equal(result.cleanup?.worktree.attempts, 2);
+  assert.equal(result.cleanup?.branch.attempts, 1);
+  assert.equal(removeCalls, 2);
+  assert.equal(deleteCalls, 1);
+});
+
+test('reports a compound cleanup failure after worktree retry without re-blocking', async () => {
+  const events = [];
+  let removeCalls = 0;
+  let deleteCalls = 0;
+  let blockedCalls = 0;
+  const base = options(events);
+  const result = await new SerialMergeQueue(
+    options(events, {
+      beads: {
+        ...base.beads,
+        async markBlocked() {
+          blockedCalls += 1;
+          throw new Error('must not re-block a merged bead');
+        },
+      },
+      git: {
+        ...base.git,
+        async deleteBranch() {
+          deleteCalls += 1;
+          throw new Error('branch deletion failed');
+        },
+      },
+    }),
+  ).enqueue({
+    ...item('gis-vst.cleanup-compound', events),
+    worktree: {
+      path: '/repo/.worktrees/gis-vst.cleanup-compound',
+      runPath: '/repo/.worktrees/gis-vst.cleanup-compound/.gis/run',
+      async remove() {
+        removeCalls += 1;
+        if (removeCalls === 1) throw new Error('worktree busy');
+      },
+    },
+  });
+
+  assert.equal(result.status, 'merged');
+  assert.equal(result.cleanup?.status, 'branch_failed');
+  assert.equal(result.cleanup?.worktree.status, 'removed');
+  assert.equal(result.cleanup?.worktree.attempts, 2);
+  assert.equal(result.cleanup?.branch.status, 'failed');
+  assert.equal(result.cleanup?.branch.attempts, 1);
+  assert.deepEqual(result.cleanup?.remaining, ['branch']);
+  assert.match(String(result.cleanupError), /branch deletion failed/);
+  assert.equal(removeCalls, 2);
+  assert.equal(deleteCalls, 1);
+  assert.equal(blockedCalls, 0);
+});
+
 test('serializes concurrent enqueue calls and continues after a blocked item', async () => {
   const events = [];
   let active = 0;
