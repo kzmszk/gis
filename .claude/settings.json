@@ -10,6 +10,18 @@
         ],
         "matcher": ""
       }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "c=$(jq -r \".tool_input.command // \\\"\\\"\"); if printf \"%s\" \"$c\" | grep -qE \"(^|[;&|]|&&)[[:space:]]*(cd[[:space:]][^&;|]*[;&|]+[[:space:]]*)?bd[[:space:]]+create([[:space:]]|$)\" && printf \"%s\" \"$c\" | grep -qE \"(^|[[:space:]])--parent([=[:space:]]|$)\"; then printf \"%s\" \"{\\\"hookSpecificOutput\\\":{\\\"hookEventName\\\":\\\"PreToolUse\\\",\\\"permissionDecision\\\":\\\"deny\\\",\\\"permissionDecisionReason\\\":\\\"bd create --parent は使用禁止です（gis-y2h）。親.N の連番 ID は切断された拠点間で必ず衝突し、pull がマージ競合で止まります。代わりに親なしで作ってから付け替えてください: ID=\\$(bd create --title=... --silent) してから bd update \\$ID --parent=<epic>。階層 ID にはなりませんが CHILDREN 一覧にも bd ready にも親付きで出ます。\\\"}}\"; fi",
+            "statusMessage": "bd create --parent をチェック中"
+          }
+        ]
+      }
     ]
   }
 }
