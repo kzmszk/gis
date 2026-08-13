@@ -189,6 +189,7 @@ export async function startReviewer(
       startWorker({
         bead: options.bead,
         agentName,
+        worktreePath: options.worktreePath,
         paneId,
         runPath: options.runPath,
         verifyCommand: options.config.verify,

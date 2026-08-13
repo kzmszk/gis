@@ -251,6 +251,8 @@ export async function runVerificationLoop(
 
     await promptWorker({
       bead: options.bead,
+      worktreePath: options.worktreePath,
+      agentName: target,
       runPath: options.runPath,
       verifyCommand: options.config.verify,
       round: attempt + 1,

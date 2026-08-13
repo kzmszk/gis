@@ -18,6 +18,10 @@ import {
 } from './config.js';
 import { buildAgentStartArgs } from './profiles.js';
 import { delay, requireNonEmpty } from './internal.js';
+import {
+  writeRecoveryMetadata,
+  type RecoveryFailureCode,
+} from './recovery-manifest.js';
 
 /** The only text that gis injects into an implementation worker's TUI. */
 export const WORKER_PROMPT =
@@ -52,6 +56,11 @@ export interface WorkerPromptOptions {
   readonly verificationCycle?: VerificationCycle;
   /** Verification attempt represented by this retry prompt. */
   readonly verificationAttempt?: number;
+  /** Stable identity used by startup recovery metadata. */
+  readonly agentName?: string;
+  /** Explicit checkout root for recovery metadata. */
+  readonly worktreePath?: string;
+  readonly failureCode?: RecoveryFailureCode;
 }
 
 export interface WorkerPrompt {
@@ -87,6 +96,7 @@ export interface PromptWorkerOptions extends WorkerPromptOptions {
 
 export interface StartWorkerOptions extends WorkerPromptOptions {
   readonly agentName: string;
+  readonly worktreePath: string;
   readonly paneId: string;
   readonly candidate: ProfileCandidate;
   readonly config: Pick<GisConfig, 'claude_permission_mode' | 'worker_timeout'>;
@@ -342,6 +352,22 @@ export async function writeWorkerPrompt(
   await mkdir(options.runPath, { recursive: true });
   await rm(resultPath, { force: true });
   await writeFile(path, content, 'utf8');
+  // Late recovery is scoped to the implementation branch. A reviewer has a
+  // separate prompt/result lifecycle and must not overwrite that branch's
+  // recovery manifest while reviewing the same worktree.
+  if (options.agentName !== undefined && role === 'implement') {
+    const worktreePath =
+      options.worktreePath ?? join(options.runPath, '..', '..');
+    await writeRecoveryMetadata(worktreePath, {
+      version: 1,
+      beadId: options.bead.id,
+      agentName: options.agentName,
+      runId,
+      resultPath: resultRelativePath,
+      failureCode: options.failureCode ?? 'unknown',
+      role,
+    });
+  }
   return { path, resultPath, resultRelativePath, runId, content };
 }
 

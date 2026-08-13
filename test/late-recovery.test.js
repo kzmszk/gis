@@ -4,6 +4,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { recoverLateCompletions } from '../dist/late-recovery.js';
+import { writeRecoveryMetadata } from '../dist/recovery-manifest.js';
+import { herdrAgentName } from '../dist/worker.js';
+import { reconcileStartup } from '../dist/recovery.js';
 
 const baseConfig = {
   concurrency: 1,
@@ -65,6 +68,37 @@ async function writeSuccessfulRun(worktreePath, runId = 'run-1') {
     }),
     'utf8',
   );
+}
+
+async function writeStructuredSuccessfulRun(
+  worktreePath,
+  {
+    beadId = 'gis-structured.1',
+    runId = 'structured-run',
+    resultPath = '.gis/run/structured.json',
+  } = {},
+) {
+  const absoluteResultPath = join(worktreePath, resultPath);
+  await mkdir(join(worktreePath, '.gis', 'run'), { recursive: true });
+  await mkdir(join(absoluteResultPath, '..'), { recursive: true });
+  await writeFile(
+    absoluteResultPath,
+    JSON.stringify({
+      run_id: runId,
+      status: 'done',
+      summary: 'structured late completion recovered',
+    }),
+    'utf8',
+  );
+  await writeRecoveryMetadata(worktreePath, {
+    version: 1,
+    beadId,
+    agentName: herdrAgentName(beadId),
+    runId,
+    resultPath,
+    failureCode: 'commit',
+    role: 'implement',
+  });
 }
 
 /** Writes a prompt but never a result file: currentResult() must resolve to
@@ -281,6 +315,457 @@ test('recovers a late-completed bead: rebases, verifies, merges, closes it, and 
     ['markMerged'],
   );
   assert.deepEqual(beadsSource.calls[0][1], beadId);
+});
+
+test('uses structured recovery metadata before legacy notes or prompt text', async (t) => {
+  const beadId = 'gis-structured.1';
+  const bead = lateCommitBead(beadId, { notes: undefined });
+  const root = await makeRoot(t);
+  const worktreePath = join(root, 'worktrees', beadId);
+  await mkdir(worktreePath, { recursive: true });
+  await writeStructuredSuccessfulRun(worktreePath, { beadId });
+  // A conflicting prompt is intentionally present: metadata is the primary
+  // protocol and must select the structured result path/run ID instead.
+  await writeFile(
+    join(worktreePath, '.gis', 'run', 'implement-prompt.md'),
+    'write a JSON result to `../../outside.json`\nRun ID: `wrong`\n',
+    'utf8',
+  );
+
+  const beadsSource = makeBeadsSource([bead]);
+  const herdr = makeHerdr([
+    { workspace_id: `ws-${beadId}`, worktree: { checkout_path: worktreePath } },
+  ]);
+  const worktreeGit = makeWorktreeGit([
+    {
+      path: worktreePath,
+      branch: beadId,
+      isBare: false,
+      isDetached: false,
+      isPrunable: false,
+    },
+  ]);
+  const mergeGit = makeMergeGit({ [worktreePath]: true });
+  const merged = await recoverLateCompletions({
+    cwd: root,
+    config: baseConfig,
+    beads: beadsSource.source,
+    herdr: herdr.herdr,
+    worktreeGit,
+    mergeGit: mergeGit.mergeGit,
+    runVerify: makeRunVerify(true).runVerify,
+  });
+
+  assert.equal(merged, 1);
+  assert.ok(mergeGit.calls.some((call) => call[0] === 'merge'));
+});
+
+test('routes a completed startup handoff through blocked state and SerialMergeQueue', async (t) => {
+  const beadId = 'gis-startup-late.1';
+  const root = await makeRoot(t);
+  const worktreePath = join(root, 'worktrees', beadId);
+  await mkdir(worktreePath, { recursive: true });
+  await writeStructuredSuccessfulRun(worktreePath, { beadId });
+  const pending = lateCommitBead(beadId, { notes: undefined });
+  const blocked = [];
+  const updates = [];
+  const workspace = {
+    workspace_id: `ws-${beadId}`,
+    label: beadId,
+    worktree: { checkout_path: worktreePath },
+  };
+  const pane = {
+    pane_id: `pane-${beadId}`,
+    workspace_id: workspace.workspace_id,
+    tab_id: `tab-${beadId}`,
+    name: herdrAgentName(beadId),
+    agent_status: 'done',
+    agent_session: {
+      source: 'test',
+      agent: 'codex',
+      kind: 'path',
+      value: join(worktreePath, '.gis', 'run', 'worker.jsonl'),
+    },
+  };
+  const source = {
+    listInProgress: async () => [pending],
+    listBlocked: async () => blocked,
+    update: async (id, update) => {
+      updates.push({ id, update });
+      return { ...pending, status: update.status };
+    },
+    markBlocked: async (id, locations) => {
+      blocked.push({ ...pending, status: 'blocked' });
+      updates.push({ id, locations });
+      return { ...pending, status: 'blocked' };
+    },
+    markMerged: async (id) => ({ ...pending, id, status: 'closed' }),
+  };
+  const startup = await reconcileStartup({
+    cwd: root,
+    beads: source,
+    herdr: {
+      apiSnapshot: async () => ({
+        type: 'session_snapshot',
+        snapshot: {
+          version: '0.7.5',
+          protocol: 17,
+          workspaces: [workspace],
+          tabs: [],
+          panes: [pane],
+          agents: [],
+          layouts: [],
+        },
+      }),
+    },
+    git: {
+      listWorktrees: async () => [
+        {
+          path: worktreePath,
+          branch: beadId,
+          isBare: false,
+          isDetached: false,
+          isPrunable: false,
+        },
+      ],
+    },
+  });
+  assert.deepEqual(startup.reopenedIssueIds, []);
+  assert.deepEqual(startup.blockedIssueIds, [beadId]);
+  assert.deepEqual(
+    updates.map((entry) => entry.update),
+    [undefined],
+  );
+
+  const herdr = makeHerdr([workspace]);
+  const mergeGit = makeMergeGit({ [worktreePath]: true });
+  const merged = await recoverLateCompletions({
+    cwd: root,
+    config: baseConfig,
+    beads: source,
+    herdr: herdr.herdr,
+    worktreeGit: makeWorktreeGit([
+      {
+        path: worktreePath,
+        branch: beadId,
+        isBare: false,
+        isDetached: false,
+        isPrunable: false,
+      },
+    ]),
+    mergeGit: mergeGit.mergeGit,
+    runVerify: makeRunVerify(true).runVerify,
+  });
+  assert.equal(merged, 1);
+  assert.ok(mergeGit.calls.some((call) => call[0] === 'merge'));
+});
+
+test('does not recover unknown metadata even when legacy notes claim commit failure', async (t) => {
+  const beadId = 'gis-structured-authoritative.1';
+  const bead = lateCommitBead(beadId);
+  const root = await makeRoot(t);
+  const worktreePath = join(root, 'worktrees', beadId);
+  await mkdir(join(worktreePath, '.gis', 'run'), { recursive: true });
+  const resultPath = '.gis/run/authoritative.json';
+  await writeFile(
+    join(worktreePath, resultPath),
+    JSON.stringify({ run_id: 'run-1', status: 'done', summary: 'done' }),
+    'utf8',
+  );
+  await writeRecoveryMetadata(worktreePath, {
+    version: 1,
+    beadId,
+    agentName: herdrAgentName(beadId),
+    runId: 'run-1',
+    resultPath,
+    failureCode: 'unknown',
+    role: 'implement',
+  });
+  const herdr = makeHerdr([
+    { workspace_id: `ws-${beadId}`, worktree: { checkout_path: worktreePath } },
+  ]);
+  const mergeGit = makeMergeGit({ [worktreePath]: true });
+  const merged = await recoverLateCompletions({
+    cwd: root,
+    config: baseConfig,
+    beads: makeBeadsSource([bead]).source,
+    herdr: herdr.herdr,
+    worktreeGit: makeWorktreeGit([
+      {
+        path: worktreePath,
+        branch: beadId,
+        isBare: false,
+        isDetached: false,
+        isPrunable: false,
+      },
+    ]),
+    mergeGit: mergeGit.mergeGit,
+    runVerify: makeRunVerify(true).runVerify,
+  });
+  assert.equal(merged, 0);
+  assert.equal(herdr.calls.length, 0);
+});
+
+test('retains a worktree and reports metadata path/run contradictions', async (t) => {
+  const root = await makeRoot(t);
+  const cases = [
+    {
+      label: 'path traversal',
+      resultPath: '../../outside.json',
+      runId: 'run-1',
+    },
+    {
+      label: 'run mismatch',
+      resultPath: '.gis/run/result.json',
+      runId: 'expected',
+    },
+  ];
+  for (const item of cases) {
+    const beadId = `gis-structured-${item.label.replaceAll(' ', '-')}`;
+    const bead = lateCommitBead(beadId, { notes: undefined });
+    const worktreePath = join(root, item.label.replaceAll(' ', '-'));
+    await mkdir(join(worktreePath, '.gis', 'run'), { recursive: true });
+    const resultPath = join(worktreePath, '.gis', 'run', 'result.json');
+    await writeFile(
+      resultPath,
+      JSON.stringify({
+        run_id: item.label === 'run mismatch' ? 'actual' : item.runId,
+        status: 'done',
+        summary: 'contradiction fixture',
+      }),
+      'utf8',
+    );
+    await writeRecoveryMetadata(worktreePath, {
+      version: 1,
+      beadId,
+      agentName: beadId,
+      runId: item.runId,
+      resultPath: item.resultPath,
+      failureCode: 'commit',
+      role: 'implement',
+    });
+    const beadsSource = makeBeadsSource([bead]);
+    const herdr = makeHerdr([
+      {
+        workspace_id: `ws-${beadId}`,
+        worktree: { checkout_path: worktreePath },
+      },
+    ]);
+    const worktreeGit = makeWorktreeGit([
+      {
+        path: worktreePath,
+        branch: beadId,
+        isBare: false,
+        isDetached: false,
+        isPrunable: false,
+      },
+    ]);
+    const mergeGit = makeMergeGit({ [worktreePath]: true });
+    const reports = [];
+    const merged = await recoverLateCompletions({
+      cwd: root,
+      config: baseConfig,
+      report: (message) => reports.push(message),
+      beads: beadsSource.source,
+      herdr: herdr.herdr,
+      worktreeGit,
+      mergeGit: mergeGit.mergeGit,
+      runVerify: makeRunVerify(true).runVerify,
+    });
+    assert.equal(merged, 0, item.label);
+    assert.equal(herdr.calls.length, 0, `${item.label}: worktree must remain`);
+    assert.ok(
+      reports.some((message) =>
+        message.includes(
+          item.label === 'path traversal'
+            ? 'escapes worktree'
+            : 'run ID mismatch',
+        ),
+      ),
+      `${item.label}: expected a contradiction diagnostic`,
+    );
+  }
+});
+
+test('reports non-success results for structured recoverable metadata', async (t) => {
+  const root = await makeRoot(t);
+  for (const [label, result] of [
+    ['missing', undefined],
+    [
+      'failure',
+      { run_id: 'run-1', status: 'failed', summary: 'worker failed' },
+    ],
+    [
+      'needs_human',
+      { run_id: 'run-1', status: 'done', summary: 'pause', needs_human: 'ask' },
+    ],
+  ]) {
+    const beadId = `gis-structured-${label}`;
+    const bead = lateCommitBead(beadId, { notes: undefined });
+    const worktreePath = join(root, label);
+    await mkdir(join(worktreePath, '.gis', 'run'), { recursive: true });
+    const resultPath = '.gis/run/result.json';
+    if (result !== undefined) {
+      await writeFile(
+        join(worktreePath, resultPath),
+        JSON.stringify(result),
+        'utf8',
+      );
+    }
+    await writeRecoveryMetadata(worktreePath, {
+      version: 1,
+      beadId,
+      agentName: herdrAgentName(beadId),
+      runId: 'run-1',
+      resultPath,
+      failureCode: 'ready_to_merge',
+      role: 'implement',
+    });
+    const reports = [];
+    const herdr = makeHerdr([
+      {
+        workspace_id: `ws-${beadId}`,
+        worktree: { checkout_path: worktreePath },
+      },
+    ]);
+    const merged = await recoverLateCompletions({
+      cwd: root,
+      config: baseConfig,
+      report: (message) => reports.push(message),
+      beads: makeBeadsSource([bead]).source,
+      herdr: herdr.herdr,
+      worktreeGit: makeWorktreeGit([
+        {
+          path: worktreePath,
+          branch: beadId,
+          isBare: false,
+          isDetached: false,
+          isPrunable: false,
+        },
+      ]),
+      mergeGit: makeMergeGit({ [worktreePath]: true }).mergeGit,
+      runVerify: makeRunVerify(true).runVerify,
+    });
+    assert.equal(merged, 0, label);
+    assert.equal(herdr.calls.length, 0, `${label}: retain worktree`);
+    assert.ok(
+      reports.some((message) =>
+        message.includes(`non-success result ${label}`),
+      ),
+    );
+  }
+});
+
+test('retains mismatched structured identity and reports a concrete diagnostic', async (t) => {
+  const root = await makeRoot(t);
+  for (const [label, override] of [
+    ['beadId', { beadId: 'gis-other-bead' }],
+    ['agentName', { agentName: herdrAgentName('gis-other-agent') }],
+  ]) {
+    const beadId = `gis-structured-identity-${label}`;
+    const bead = lateCommitBead(beadId, { notes: undefined });
+    const worktreePath = join(root, label);
+    await mkdir(join(worktreePath, '.gis', 'run'), { recursive: true });
+    const resultPath = '.gis/run/result.json';
+    await writeFile(
+      join(worktreePath, resultPath),
+      JSON.stringify({ run_id: 'run-1', status: 'done', summary: 'done' }),
+      'utf8',
+    );
+    await writeRecoveryMetadata(worktreePath, {
+      version: 1,
+      beadId,
+      agentName: herdrAgentName(beadId),
+      runId: 'run-1',
+      resultPath,
+      failureCode: 'ready_to_merge',
+      role: 'implement',
+      ...override,
+    });
+    const reports = [];
+    const herdr = makeHerdr([
+      {
+        workspace_id: `ws-${beadId}`,
+        worktree: { checkout_path: worktreePath },
+      },
+    ]);
+    const merged = await recoverLateCompletions({
+      cwd: root,
+      config: baseConfig,
+      report: (message) => reports.push(message),
+      beads: makeBeadsSource([bead]).source,
+      herdr: herdr.herdr,
+      worktreeGit: makeWorktreeGit([
+        {
+          path: worktreePath,
+          branch: beadId,
+          isBare: false,
+          isDetached: false,
+          isPrunable: false,
+        },
+      ]),
+      mergeGit: makeMergeGit({ [worktreePath]: true }).mergeGit,
+      runVerify: makeRunVerify(true).runVerify,
+    });
+    assert.equal(merged, 0, label);
+    assert.equal(herdr.calls.length, 0, `${label}: no worktree removal`);
+    assert.ok(
+      reports.some((message) => message.includes(`metadata ${label}`)),
+      `${label}: expected identity diagnostic`,
+    );
+  }
+});
+
+test('does not recover review-blocked or human-gated metadata despite a successful result', async (t) => {
+  const root = await makeRoot(t);
+  for (const failureCode of ['review_blocked', 'human_gate']) {
+    const beadId = `gis-review-terminal-${failureCode}`;
+    const bead = lateCommitBead(beadId);
+    const worktreePath = join(root, failureCode);
+    await mkdir(join(worktreePath, '.gis', 'run'), { recursive: true });
+    const resultPath = '.gis/run/result.json';
+    await writeFile(
+      join(worktreePath, resultPath),
+      JSON.stringify({ run_id: 'run-1', status: 'done', summary: 'done' }),
+      'utf8',
+    );
+    await writeRecoveryMetadata(worktreePath, {
+      version: 1,
+      beadId,
+      agentName: herdrAgentName(beadId),
+      runId: 'run-1',
+      resultPath,
+      failureCode,
+      role: 'implement',
+    });
+    const herdr = makeHerdr([
+      {
+        workspace_id: `ws-${beadId}`,
+        worktree: { checkout_path: worktreePath },
+      },
+    ]);
+    const mergeGit = makeMergeGit({ [worktreePath]: true });
+    const merged = await recoverLateCompletions({
+      cwd: root,
+      config: baseConfig,
+      beads: makeBeadsSource([bead]).source,
+      herdr: herdr.herdr,
+      worktreeGit: makeWorktreeGit([
+        {
+          path: worktreePath,
+          branch: beadId,
+          isBare: false,
+          isDetached: false,
+          isPrunable: false,
+        },
+      ]),
+      mergeGit: mergeGit.mergeGit,
+      runVerify: makeRunVerify(true).runVerify,
+    });
+    assert.equal(merged, 0, failureCode);
+    assert.deepEqual(mergeGit.calls, [], `${failureCode}: queue must not run`);
+    assert.equal(herdr.calls.length, 0, `${failureCode}: worktree retained`);
+  }
 });
 
 test('does not recover a blocked bead whose worktree was already removed', async (t) => {

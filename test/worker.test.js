@@ -11,6 +11,7 @@ import {
   startWorker,
   writeWorkerPrompt,
 } from '../dist/worker.js';
+import { recoveryMetadataPath } from '../dist/recovery-manifest.js';
 
 const bead = {
   id: 'gis-vst.6',
@@ -69,6 +70,7 @@ function startOptions(root, overrides = {}) {
     bead,
     agentName,
     runPath: join(root, '.gis', 'run'),
+    worktreePath: root,
     verifyCommand: 'npm test',
     paneId,
     candidate: DEFAULT_CONFIG.profiles.implement[0],
@@ -164,6 +166,19 @@ test('starts the worker after writing the implementation prompt and injects one 
       await readFile(result.prompt.path, 'utf8'),
       result.prompt.content,
     );
+    const metadata = JSON.parse(
+      await readFile(recoveryMetadataPath(root), 'utf8'),
+    );
+    assert.equal(metadata.beadId, bead.id);
+    assert.equal(metadata.agentName, agentName);
+    assert.equal(metadata.runId, result.prompt.runId);
+    assert.equal(metadata.resultPath, result.prompt.resultRelativePath);
+    assert.equal(metadata.role, 'implement');
+    assert.ok(recoveryMetadataPath(root).startsWith(`${root}/`));
+    assert.notEqual(
+      recoveryMetadataPath(root),
+      join(root, '..', '.gis', 'run', 'recovery.json'),
+    );
     assert.deepEqual(
       calls.map(({ type }) => type),
       ['snapshot', 'start', 'snapshot', 'prompt'],
@@ -251,6 +266,32 @@ test('uses a separate reviewer prompt file', async () => {
     assert.equal(prompt.path, join(root, '.gis', 'run', 'review-prompt.md'));
     assert.equal(await readFile(prompt.path, 'utf8'), prompt.content);
     assert.match(prompt.content, /gis reviewer task/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('review prompts do not overwrite implementation recovery metadata', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'gis-review-metadata-'));
+  try {
+    const implementation = await writeWorkerPrompt({
+      bead,
+      agentName,
+      worktreePath: root,
+      runPath: join(root, '.gis', 'run'),
+      verifyCommand: 'npm test',
+    });
+    const before = await readFile(recoveryMetadataPath(root), 'utf8');
+    await writeWorkerPrompt({
+      bead,
+      agentName: 'review-agent',
+      worktreePath: root,
+      runPath: join(root, '.gis', 'run'),
+      verifyCommand: 'npm test',
+      role: 'review',
+    });
+    assert.equal(await readFile(recoveryMetadataPath(root), 'utf8'), before);
+    assert.match(before, new RegExp(implementation.runId));
   } finally {
     await rm(root, { recursive: true, force: true });
   }

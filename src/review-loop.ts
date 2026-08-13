@@ -26,6 +26,10 @@ import {
 } from './result.js';
 import type { BeadWorktree } from './worktree.js';
 import { delay, errorMessage } from './internal.js';
+import {
+  updateRecoveryFailure,
+  type RecoveryFailureCode,
+} from './recovery-manifest.js';
 
 export type ReviewLoopOutcome = 'approved' | 'blocked' | 'human';
 
@@ -73,6 +77,25 @@ export type ReviewProblem = Exclude<
   | { readonly kind: 'changes_requested' }
   | { readonly kind: 'needs_human' }
 >;
+
+async function recordReviewFailure(
+  options: ReviewLoopOptions,
+  failureCode: RecoveryFailureCode,
+): Promise<void> {
+  await updateRecoveryFailure(options.worktree.path, failureCode);
+}
+
+async function settleReviewOutcome(
+  options: ReviewLoopOptions,
+  outcome: ReviewLoopOutcome,
+): Promise<ReviewLoopOutcome> {
+  if (outcome === 'human') {
+    await recordReviewFailure(options, 'human_gate');
+  } else if (outcome === 'blocked') {
+    await recordReviewFailure(options, 'review_blocked');
+  }
+  return outcome;
+}
 
 function assertNever(value: never): never {
   throw new Error(`unhandled review result: ${JSON.stringify(value)}`);
@@ -449,6 +472,8 @@ async function runReviewFixCycle(
   );
   const implementationPrompt = await promptWorker({
     bead: options.bead,
+    worktreePath: options.worktree.path,
+    agentName: options.implementation.agentName,
     runPath: options.worktree.runPath,
     verifyCommand: options.config.verify,
     round: round + 1,
@@ -527,7 +552,7 @@ export async function runReviewLoop(
 ): Promise<ReviewLoopOutcome> {
   const session = await startReviewSession(options);
   if ('outcome' in session) {
-    return session.outcome;
+    return settleReviewOutcome(options, session.outcome);
   }
   const { reviewer } = session;
 
@@ -538,7 +563,7 @@ export async function runReviewLoop(
   while (true) {
     const verdict = await awaitReviewVerdict(reviewer, prompt, options);
     if ('outcome' in verdict) {
-      return verdict.outcome;
+      return settleReviewOutcome(options, verdict.outcome);
     }
 
     switch (verdict.kind) {
@@ -546,10 +571,13 @@ export async function runReviewLoop(
         return 'approved';
 
       case 'needs_human':
-        return requestHuman(
-          verdict.reason,
-          await reviewerHandoff(reviewer, options),
+        return settleReviewOutcome(
           options,
+          await requestHuman(
+            verdict.reason,
+            await reviewerHandoff(reviewer, options),
+            options,
+          ),
         );
 
       case 'failure':
@@ -557,7 +585,10 @@ export async function runReviewLoop(
       case 'invalid_json':
       case 'stale':
       case 'missing':
-        return blockReviewProblem(verdict, reviewer, options);
+        return settleReviewOutcome(
+          options,
+          await blockReviewProblem(verdict, reviewer, options),
+        );
 
       case 'changes_requested': {
         const feedback = requestedChangesFeedback(verdict);
@@ -569,7 +600,7 @@ export async function runReviewLoop(
           options,
         );
         if (cycle.kind === 'terminal') {
-          return cycle.outcome;
+          return settleReviewOutcome(options, cycle.outcome);
         }
         round = cycle.round;
         prompt = cycle.prompt;

@@ -38,6 +38,10 @@ import {
   type VerifyLoopResult,
 } from './verify.js';
 import { delay, errorMessage } from './internal.js';
+import {
+  updateRecoveryFailure,
+  type RecoveryFailureCode,
+} from './recovery-manifest.js';
 
 /** The terminal state recorded by a job in the foreground orchestration loop. */
 export type JobOutcome =
@@ -120,6 +124,18 @@ function handoff(
     roundLogPath: worktree.runPath,
     transcriptPath,
   };
+}
+
+/** Best-effort update of the machine-readable handoff state.
+ *
+ * A missing or malformed manifest must never hide the original blocked
+ * transition; the Beads handoff remains authoritative for legacy workers.
+ */
+async function recordRecoveryFailure(
+  worktreePath: string,
+  failureCode: RecoveryFailureCode,
+): Promise<void> {
+  await updateRecoveryFailure(worktreePath, failureCode);
 }
 
 async function waitForCurrentResult(
@@ -273,6 +289,7 @@ async function startImplementationWorker(
         return options.workers.start({
           bead,
           agentName,
+          worktreePath: worktree.path,
           runPath: worktree.runPath,
           verifyCommand: options.config.verify,
           paneId: worktree.paneId,
@@ -296,6 +313,7 @@ async function startImplementationWorker(
     options.report(
       `gis: worker ${phase} failed for ${bead.id}: ${errorMessage(error)}`,
     );
+    await recordRecoveryFailure(worktree.path, 'worker_start');
     const transcriptPath = defaultTranscriptPath(
       workerKind ?? 'unknown',
       worktree.path,
@@ -382,8 +400,12 @@ async function waitForImplementationOutcome(
   session: WorkerSession,
   options: BeadJobProcessorOptions,
 ): Promise<'success' | 'human' | 'blocked'> {
-  const blockWithReport = async (message: string): Promise<'blocked'> => {
+  const blockWithReport = async (
+    message: string,
+    failureCode: RecoveryFailureCode,
+  ): Promise<'blocked'> => {
     options.report(message);
+    await recordRecoveryFailure(session.worktree.path, failureCode);
     await options.beads.markBlocked(
       session.bead.id,
       await session.currentHandoff(),
@@ -397,9 +419,11 @@ async function waitForImplementationOutcome(
   } catch (error: unknown) {
     return blockWithReport(
       `gis: worker wait failed for ${session.bead.id}: ${errorMessage(error)}`,
+      'worker_wait',
     );
   }
   if (waitResult.status === 'blocked') {
+    await recordRecoveryFailure(session.worktree.path, 'worker_wait');
     return 'blocked';
   }
 
@@ -413,11 +437,13 @@ async function waitForImplementationOutcome(
   } catch (error: unknown) {
     return blockWithReport(
       `gis: worker result read failed for ${session.bead.id}: ${errorMessage(error)}`,
+      'result_invalid',
     );
   }
 
   switch (result.kind) {
     case 'needs_human': {
+      await recordRecoveryFailure(session.worktree.path, 'human_gate');
       const locations = await session.currentHandoff();
       await options.beads.markBlocked(session.bead.id, locations);
       try {
@@ -442,6 +468,9 @@ async function waitForImplementationOutcome(
       const detail = workerResultProblemDetail(result);
       return blockWithReport(
         `gis: worker result ${result.kind} for ${session.bead.id}: ${detail}`,
+        result.kind === 'missing' || result.kind === 'stale'
+          ? 'result_missing'
+          : 'result_invalid',
       );
     }
     default: {
@@ -451,6 +480,7 @@ async function waitForImplementationOutcome(
       return blockWithReport(
         `gis: worker result had an unknown kind for ${session.bead.id}: ` +
           JSON.stringify(unexpected),
+        'result_invalid',
       );
     }
   }
@@ -521,6 +551,7 @@ async function finishImplementation(
 
   try {
     if ((await verifyImplementation({ kind: 'initial' })) === 'blocked') {
+      await recordRecoveryFailure(worktree.path, 'verification');
       return { status: 'blocked' };
     }
 
@@ -557,10 +588,15 @@ async function finishImplementation(
         report: options.report,
       });
       if (reviewOutcome !== 'approved') {
+        await recordRecoveryFailure(
+          worktree.path,
+          reviewOutcome === 'human' ? 'human_gate' : 'review_blocked',
+        );
         return { status: reviewOutcome };
       }
     }
 
+    await recordRecoveryFailure(worktree.path, 'ready_to_merge');
     const finalTranscriptPath = await session.currentTranscriptPath();
     const mergeResult = await options.merge.enqueue({
       bead,
@@ -598,11 +634,14 @@ async function finishImplementation(
       }
       return { status: 'merged' };
     }
+    await recordRecoveryFailure(worktree.path, 'commit');
     return { status: 'blocked' };
   } catch (error: unknown) {
     if (error instanceof AlreadyBlockedError) {
+      await recordRecoveryFailure(worktree.path, 'worker_wait');
       return { status: 'blocked' };
     }
+    await recordRecoveryFailure(worktree.path, 'verification');
     await options.beads.markBlocked(bead.id, await session.currentHandoff());
     return { status: 'blocked' };
   }
