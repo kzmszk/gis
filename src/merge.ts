@@ -5,6 +5,7 @@ import type { Bead, BeadHandoffLocations } from './beads.js';
 import { parseDurationMs } from './config.js';
 import type { GitAdapterOptions } from './recovery.js';
 import { GitCommandError } from './recovery.js';
+import { requireNonEmpty } from './internal.js';
 import {
   runVerifyCommand,
   type VerifyCommandResult,
@@ -74,12 +75,6 @@ export interface MergeMergedResult {
 }
 
 export type MergeResult = MergeMergedResult | MergeBlockedResult;
-
-function requireNonEmpty(value: string, name: string): void {
-  if (typeof value !== 'string' || value.trim().length === 0) {
-    throw new TypeError(`${name} must not be empty`);
-  }
-}
 
 function verifyFailure(result: VerifyCommandResult): string {
   const output = [result.stdout?.trim(), result.stderr?.trim()]

@@ -17,6 +17,7 @@ import {
   type ProfileCandidate,
 } from './config.js';
 import { buildAgentStartArgs } from './profiles.js';
+import { delay, requireNonEmpty } from './internal.js';
 
 /** The only text that gis injects into an implementation worker's TUI. */
 export const WORKER_PROMPT =
@@ -126,12 +127,6 @@ export class WorkerStartupError extends Error {
     );
     this.name = 'WorkerStartupError';
     this.phase = phase;
-  }
-}
-
-function requireNonEmpty(value: string, name: string): void {
-  if (typeof value !== 'string' || value.trim().length === 0) {
-    throw new TypeError(`${name} must not be empty`);
   }
 }
 
@@ -356,10 +351,6 @@ function defaultHerdr(): WorkerStartupSource {
 
 function promptAcceptanceOptions(timeoutMs: number): AgentPromptOptions {
   return { wait: { until: ['working'], timeoutMs } };
-}
-
-function delay(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function remainingTime(deadline: number): number {

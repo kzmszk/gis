@@ -9,6 +9,7 @@ import {
   type WorktreeRemoveOptions,
   type WorktreeRemovedResult,
 } from './herdr.js';
+import { requireNonEmpty } from './internal.js';
 
 export interface WorktreeLifecycleSource {
   worktreeCreate(options: {
@@ -43,12 +44,6 @@ export interface CreateBeadWorktreeOptions {
 export type BeadWorktreeOperation<T> = (
   worktree: BeadWorktree,
 ) => Promise<T> | T;
-
-function requireNonEmpty(value: string, name: string): void {
-  if (typeof value !== 'string' || value.trim().length === 0) {
-    throw new TypeError(`${name} must not be empty`);
-  }
-}
 
 function defaultHerdr(): WorktreeLifecycleSource {
   return createHerdrAdapter() as HerdrClient;

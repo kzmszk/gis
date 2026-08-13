@@ -11,6 +11,7 @@ import {
   startReviewer,
 } from '../dist/review.js';
 import {
+  pollUntilTerminal,
   requestedChangesFeedback,
   reviewProblemDetail,
   runReviewLoop,
@@ -1071,6 +1072,31 @@ function readyReviewerHerdr({ reviewerName, agentKind = 'claude', onPrompt }) {
     },
   };
 }
+
+test('clamps a poll delay to the remaining timeout', async () => {
+  const waits = [];
+  let reads = 0;
+  const originalNow = Date.now;
+  const originalSetTimeout = globalThis.setTimeout;
+  Date.now = () => 0;
+  globalThis.setTimeout = (callback, milliseconds, ...args) => {
+    waits.push(milliseconds);
+    callback(...args);
+    return 0;
+  };
+  try {
+    const result = await pollUntilTerminal(async () => {
+      reads += 1;
+      return reads === 1 ? { kind: 'missing' } : { kind: 'success' };
+    }, '100ms');
+
+    assert.deepEqual(result, { kind: 'success' });
+    assert.deepEqual(waits, [100]);
+  } finally {
+    Date.now = originalNow;
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
 
 test('blocks without starting a reviewer when herdr pane.split is unavailable', async () => {
   const root = await mkdtemp(join(tmpdir(), 'gis-review-nosplit-'));

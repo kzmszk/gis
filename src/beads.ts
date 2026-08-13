@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import type { ExecFileException } from 'node:child_process';
 import { promisify } from 'node:util';
+import { requireNonEmpty, text } from './internal.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -106,7 +107,7 @@ export class BeadsCommandError extends BeadsError {
         ? error.code
         : undefined;
     this.signal = typeof error.signal === 'string' ? error.signal : undefined;
-    this.stderr = toText(error.stderr);
+    this.stderr = text(error.stderr);
   }
 }
 
@@ -114,20 +115,6 @@ export class BeadsProtocolError extends BeadsError {
   constructor(message: string) {
     super(`invalid bd JSON response: ${message}`);
     this.name = 'BeadsProtocolError';
-  }
-}
-
-function toText(value: unknown): string {
-  return typeof value === 'string'
-    ? value
-    : value instanceof Buffer
-      ? value.toString('utf8')
-      : '';
-}
-
-function requireNonEmpty(value: string, name: string): void {
-  if (typeof value !== 'string' || value.trim().length === 0) {
-    throw new TypeError(`${name} must not be empty`);
   }
 }
 
