@@ -35,6 +35,15 @@ bd close <id>         # Complete work
   disables that push; the issue data at `refs/dolt/data` is unaffected. `.husky/pre-push`
   already exports it — set it in your shell profile (and in any cloud routine or second
   machine) so manual pushes match. See gis-v3t.
+- **Check the exit code every time you run `bd dolt push` yourself.** It does not overwrite
+  the remote: like git, it rejects a non-fast-forward and leaves your changes stranded
+  locally. A cloud session already lost three issues this way — the push was refused, nobody
+  read the message, and the environment was gone before anyone noticed. On failure run
+  `bd dolt pull`, then push again. If the pull reports a merge conflict, **stop and report
+  it**; do not work around it. The pre-push hook counts consecutive failures in
+  `.beads/push-state.json` and blocks the git push once they reach `BEADS_PUSH_FAIL_LIMIT`
+  (default 3), and `scripts/beads-sync-guard.sh check` replays that state at session start —
+  but neither sees a `bd dolt push` you invoke directly, so check it yourself. See gis-apr.
 
 **Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git remote; `.beads/issues.jsonl` is a passive export. See https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md for details and anti-patterns.
 

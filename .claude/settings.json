@@ -9,6 +9,10 @@
           {
             "command": "bd prime --hook-json",
             "type": "command"
+          },
+          {
+            "command": "sh \"$CLAUDE_PROJECT_DIR/scripts/beads-sync-guard.sh\" check",
+            "type": "command"
           }
         ],
         "matcher": ""
