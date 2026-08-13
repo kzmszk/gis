@@ -64,7 +64,7 @@ function readySnapshot(agent = {}) {
   };
 }
 
-test('parses reviewer verdicts and rejects malformed review results', () => {
+test('parses reviewer verdicts', () => {
   assert.deepEqual(
     parseReviewResult(
       JSON.stringify({
@@ -99,26 +99,6 @@ test('parses reviewer verdicts and rejects malformed review results', () => {
       'run-1',
     ).kind,
     'changes_requested',
-  );
-  assert.equal(
-    parseReviewResult('{"status":"done","summary":"missing verdict"}').kind,
-    'invalid_schema',
-  );
-  assert.deepEqual(
-    parseReviewResult(
-      JSON.stringify({
-        run_id: '',
-        status: 'nope',
-        summary: '',
-        verdict: 'nope',
-      }),
-    ).issues,
-    [
-      'run_id must be a non-empty string',
-      'status must be "done" or "failed"',
-      'summary must be a non-empty string',
-      'verdict must be "approved" or "changes_requested"',
-    ],
   );
 });
 
@@ -191,8 +171,51 @@ test('reports each review result schema violation independently', () => {
   for (const [value, expectedIssue] of cases) {
     const parsed = parseReviewResult(JSON.stringify(value));
     assert.equal(parsed.kind, 'invalid_schema');
+    assert.equal(parsed.path, '<review-result>');
     assert.deepEqual(parsed.issues, [expectedIssue]);
   }
+
+  const allInvalid = parseReviewResult(
+    JSON.stringify({
+      run_id: '',
+      status: 'nope',
+      summary: '  ',
+      verdict: 'nope',
+      feedback: '',
+      needs_human: '  ',
+    }),
+  );
+  assert.equal(allInvalid.kind, 'invalid_schema');
+  assert.equal(allInvalid.path, '<review-result>');
+  assert.deepEqual(allInvalid.issues, [
+    'run_id must be a non-empty string',
+    'status must be "done" or "failed"',
+    'summary must be a non-empty string',
+    'verdict must be "approved" or "changes_requested"',
+    'feedback must be a non-empty string when present',
+    'needs_human must be a non-empty string when present',
+  ]);
+});
+
+test('returns stale before needs_human when the run id does not match', () => {
+  const stale = parseReviewResult(
+    JSON.stringify({
+      run_id: 'run-old',
+      status: 'failed',
+      summary: 'review paused',
+      verdict: 'changes_requested',
+      needs_human: 'choose whether to continue',
+    }),
+    'review.json',
+    'run-current',
+  );
+
+  assert.deepEqual(stale, {
+    kind: 'stale',
+    path: 'review.json',
+    expectedRunId: 'run-current',
+    actualRunId: 'run-old',
+  });
 });
 
 test('classifies malformed JSON and terminal review outcomes through the parser', () => {

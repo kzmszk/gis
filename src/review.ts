@@ -297,8 +297,7 @@ export function parseReviewResult(
       kind: 'stale',
       path,
       expectedRunId,
-      actualRunId:
-        typeof result.run_id === 'string' ? result.run_id : undefined,
+      actualRunId: result.run_id,
     };
   }
   if (result.needs_human !== undefined) {
