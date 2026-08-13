@@ -22,6 +22,13 @@ bd close <id>         # Complete work
 - Use `bd` for ALL task tracking — do NOT use TodoWrite, TaskCreate, or markdown TODO lists
 - Run `bd prime` for detailed command reference and session close protocol
 - Use `bd remember` for persistent knowledge — do NOT use MEMORY.md files
+- **Never pass `--parent` to `bd create`.** It allocates a sequential `parent.N` id from a
+  local counter, so two sites that are out of sync hand out the same id and the next
+  `bd dolt pull` stops on a merge conflict. Create the issue on its own, then attach it:
+  `ID=$(bd create --title=... --silent)` followed by `bd update $ID --parent=<epic>`.
+  The id is no longer hierarchical, but the issue still shows under CHILDREN and in
+  `bd ready` with its parent. A PreToolUse hook in `.claude/settings.json` enforces this
+  for Claude Code; other agents have to follow it by reading this. See gis-y2h.
 
 **Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git remote; `.beads/issues.jsonl` is a passive export. See https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md for details and anti-patterns.
 
