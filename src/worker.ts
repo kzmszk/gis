@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import type { Bead } from './beads.js';
 import {
   createHerdrAdapter,
+  type AgentInfo,
   type AgentPromptedResult,
   type AgentStartedResult,
   type AgentStartOptions,
@@ -393,6 +394,61 @@ async function beforeDeadline<T>(
   }
 }
 
+/** True once a snapshot entry is the agent this start call is tracking. */
+function matchesStartedAgent(
+  agent: AgentInfo | undefined,
+  name: string,
+  kind: string,
+  stateChangeSeq: number | undefined,
+  previousStateChangeSeq: number,
+): boolean {
+  return (
+    agent?.name === name &&
+    agent?.agent === kind &&
+    typeof stateChangeSeq === 'number' &&
+    stateChangeSeq > previousStateChangeSeq
+  );
+}
+
+/** True once the tracked agent has finished starting and accepts input. */
+function isReadyForPrompt(
+  agent: AgentInfo | undefined,
+  matches: boolean,
+): boolean {
+  if (!matches || agent === undefined) return false;
+  const launchIsSettled =
+    agent.agent_status === 'idle' || agent.agent_status === 'done';
+  return (
+    agent.interactive_ready === true &&
+    agent.launch_pending !== true &&
+    launchIsSettled
+  );
+}
+
+/**
+ * The tracked agent's state_change_seq while it is in the idle-but-still-
+ * launch_pending state some Herdr versions leave, or `undefined` when that
+ * state does not apply. Returning the sequence number (rather than a plain
+ * boolean) keeps its "is a number" proof visible to the caller instead of
+ * requiring a non-null assertion once matchesStartedAgent's own check is out
+ * of scope.
+ */
+function idleLaunchPendingSeq(
+  agent: AgentInfo | undefined,
+  matches: boolean,
+  stateChangeSeq: number | undefined,
+): number | undefined {
+  if (
+    !matches ||
+    agent === undefined ||
+    agent.launch_pending !== true ||
+    agent.agent_status !== 'idle'
+  ) {
+    return undefined;
+  }
+  return stateChangeSeq;
+}
+
 async function waitForNamedAgentReady(
   herdr: WorkerStartupSource,
   paneId: string,
@@ -413,34 +469,23 @@ async function waitForNamedAgentReady(
       (candidate) => candidate.pane_id === paneId,
     );
     const stateChangeSeq = agent?.state_change_seq;
-    const matchesStartedAgent =
-      agent?.name === name &&
-      agent.agent === kind &&
-      typeof stateChangeSeq === 'number' &&
-      stateChangeSeq > previousStateChangeSeq;
-    const launchIsSettled =
-      agent?.agent_status === 'idle' || agent?.agent_status === 'done';
-    if (
-      matchesStartedAgent &&
-      agent.interactive_ready === true &&
-      agent.launch_pending !== true &&
-      launchIsSettled
-    ) {
+    const matches = matchesStartedAgent(
+      agent,
+      name,
+      kind,
+      stateChangeSeq,
+      previousStateChangeSeq,
+    );
+
+    if (isReadyForPrompt(agent, matches)) {
       return;
     }
 
-    if (
-      matchesStartedAgent &&
-      typeof stateChangeSeq === 'number' &&
-      agent.launch_pending === true &&
-      agent.agent_status === 'idle'
-    ) {
+    const idleSeq = idleLaunchPendingSeq(agent, matches, stateChangeSeq);
+    if (idleSeq !== undefined) {
       const now = Date.now();
-      if (
-        stableIdle === undefined ||
-        stableIdle.stateChangeSeq !== stateChangeSeq
-      ) {
-        stableIdle = { stateChangeSeq, since: now };
+      if (stableIdle === undefined || stableIdle.stateChangeSeq !== idleSeq) {
+        stableIdle = { stateChangeSeq: idleSeq, since: now };
       }
       if (now - stableIdle.since >= idleFallbackMs) {
         return;
@@ -474,10 +519,8 @@ export async function promptWorker(
   return { prompt, prompted };
 }
 
-/** Write the prompt, start the selected runner, then inject only WORKER_PROMPT. */
-export async function startWorker(
-  options: StartWorkerOptions,
-): Promise<StartedWorker> {
+/** Validate a startWorker call and resolve its idle-readiness fallback. */
+function validateStartWorkerOptions(options: StartWorkerOptions): number {
   requireNonEmpty(options.agentName, 'agentName');
   if (!HERDR_AGENT_NAME_PATTERN.test(options.agentName)) {
     throw new TypeError('agentName must be a valid Herdr agent name');
@@ -491,6 +534,82 @@ export async function startWorker(
       'idleReadinessFallbackMs must be a non-negative finite number',
     );
   }
+  return idleFallbackMs;
+}
+
+/** Capture the pre-start snapshot, then issue `agent.start` before the deadline. */
+async function startAgent(
+  herdr: WorkerStartupSource,
+  options: StartWorkerOptions,
+  deadline: number,
+): Promise<{
+  readonly started: AgentStartedResult;
+  readonly previousStateChangeSeq: number;
+}> {
+  try {
+    const beforeStart = await beforeDeadline(
+      herdr.apiSnapshot(remainingTime(deadline)),
+      deadline,
+      `capturing agent ${options.agentName} pre-start snapshot`,
+    );
+    const previousAgent = beforeStart.snapshot.agents.find(
+      (agent) => agent.pane_id === options.paneId,
+    );
+    const previousStateChangeSeq =
+      typeof previousAgent?.state_change_seq === 'number'
+        ? previousAgent.state_change_seq
+        : -1;
+    const agentStartTimeoutMs = remainingTime(deadline);
+    if (agentStartTimeoutMs <= MIN_AGENT_START_TIMEOUT_MS) {
+      throw new Error('not enough startup time remains for herdr agent.start');
+    }
+    const started = await beforeDeadline(
+      herdr.agentStart({
+        name: options.agentName,
+        kind: options.candidate.kind,
+        paneId: options.paneId,
+        args: buildAgentStartArgs(options.candidate, options.config),
+        timeoutMs: agentStartTimeoutMs,
+      }),
+      deadline,
+      `starting agent ${options.agentName}`,
+    );
+    return { started, previousStateChangeSeq };
+  } catch (error: unknown) {
+    throw new WorkerStartupError('start', error);
+  }
+}
+
+/** Inject the one-line worker prompt into the now-ready agent pane. */
+async function promptStartedAgent(
+  herdr: WorkerStartupSource,
+  options: StartWorkerOptions,
+  deadline: number,
+): Promise<AgentPromptedResult> {
+  try {
+    const promptTimeoutMs = remainingTime(deadline);
+    if (promptTimeoutMs === 0) {
+      throw new Error(`prompting agent ${options.agentName} timed out`);
+    }
+    return await beforeDeadline(
+      herdr.agentPrompt(
+        options.agentName,
+        workerPromptForRole(options.role ?? 'implement'),
+        promptAcceptanceOptions(promptTimeoutMs),
+      ),
+      deadline,
+      `prompting agent ${options.agentName}`,
+    );
+  } catch (error: unknown) {
+    throw new WorkerStartupError('prompt', error);
+  }
+}
+
+/** Write the prompt, start the selected runner, then inject only WORKER_PROMPT. */
+export async function startWorker(
+  options: StartWorkerOptions,
+): Promise<StartedWorker> {
+  const idleFallbackMs = validateStartWorkerOptions(options);
 
   const prompt = await writeWorkerPrompt(options);
   const herdr = options.herdr ?? defaultHerdr();
@@ -508,39 +627,12 @@ export async function startWorker(
     MAX_AGENT_START_TIMEOUT_MS,
   );
   const deadline = Date.now() + startTimeoutMs;
-  let started: AgentStartedResult;
-  let previousStateChangeSeq: number;
-  try {
-    const beforeStart = await beforeDeadline(
-      herdr.apiSnapshot(remainingTime(deadline)),
-      deadline,
-      `capturing agent ${options.agentName} pre-start snapshot`,
-    );
-    const previousAgent = beforeStart.snapshot.agents.find(
-      (agent) => agent.pane_id === options.paneId,
-    );
-    previousStateChangeSeq =
-      typeof previousAgent?.state_change_seq === 'number'
-        ? previousAgent.state_change_seq
-        : -1;
-    const agentStartTimeoutMs = remainingTime(deadline);
-    if (agentStartTimeoutMs <= MIN_AGENT_START_TIMEOUT_MS) {
-      throw new Error('not enough startup time remains for herdr agent.start');
-    }
-    started = await beforeDeadline(
-      herdr.agentStart({
-        name: options.agentName,
-        kind: options.candidate.kind,
-        paneId: options.paneId,
-        args: buildAgentStartArgs(options.candidate, options.config),
-        timeoutMs: agentStartTimeoutMs,
-      }),
-      deadline,
-      `starting agent ${options.agentName}`,
-    );
-  } catch (error: unknown) {
-    throw new WorkerStartupError('start', error);
-  }
+
+  const { started, previousStateChangeSeq } = await startAgent(
+    herdr,
+    options,
+    deadline,
+  );
 
   try {
     await waitForNamedAgentReady(
@@ -556,23 +648,6 @@ export async function startWorker(
     throw new WorkerStartupError('readiness', error);
   }
 
-  let prompted: AgentPromptedResult;
-  try {
-    const promptTimeoutMs = remainingTime(deadline);
-    if (promptTimeoutMs === 0) {
-      throw new Error(`prompting agent ${options.agentName} timed out`);
-    }
-    prompted = await beforeDeadline(
-      herdr.agentPrompt(
-        options.agentName,
-        workerPromptForRole(options.role ?? 'implement'),
-        promptAcceptanceOptions(promptTimeoutMs),
-      ),
-      deadline,
-      `prompting agent ${options.agentName}`,
-    );
-  } catch (error: unknown) {
-    throw new WorkerStartupError('prompt', error);
-  }
+  const prompted = await promptStartedAgent(herdr, options, deadline);
   return { prompt, started, prompted };
 }

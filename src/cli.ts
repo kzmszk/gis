@@ -49,47 +49,65 @@ async function configuredSlopBase(cwd: string): Promise<string> {
   }
 }
 
+/** `gis init [--defaults]` */
+function runInitCommand(
+  unexpectedArgs: readonly string[],
+): Promise<InitResult> {
+  if (
+    unexpectedArgs.length > 1 ||
+    (unexpectedArgs.length === 1 && unexpectedArgs[0] !== '--defaults')
+  ) {
+    throw new Error('usage: gis init [--defaults]');
+  }
+  return initializeProject({ defaults: unexpectedArgs[0] === '--defaults' });
+}
+
+/** `gis slop [--base <git-ref>] [--max-delta <fraction>] [--report]` */
+async function runSlopCommand(
+  unexpectedArgs: readonly string[],
+): Promise<void> {
+  const options = parseSlopOptions(unexpectedArgs);
+  const comparison = await measureWorktreeSlop(
+    process.cwd(),
+    options.base ?? (await configuredSlopBase(process.cwd())),
+  );
+  console.log(serializeSlopReport(comparison));
+  if (
+    !options.reportOnly &&
+    (comparison.verbosityDelta > options.maxDelta ||
+      comparison.erosionDelta > options.maxDelta)
+  ) {
+    throw new Error(`slop score regressed by more than ${options.maxDelta}`);
+  }
+}
+
+/** `gis run`: reconcile startup state, recover late completions, then loop. */
+async function runRunCommand(): Promise<RunSummary> {
+  const cwd = process.cwd();
+  const config = await loadConfig(cwd);
+  await reconcileStartup({ cwd, baseBranch: config.base });
+  const recovered = await recoverLateCompletions({ cwd, config });
+  return runForegroundLoop({ cwd, config, initialMerged: recovered });
+}
+
 export async function main(
   args: string[],
 ): Promise<RunSummary | InitResult | void> {
   const [command, ...unexpectedArgs] = args;
 
   if (command === 'init') {
-    if (
-      unexpectedArgs.length > 1 ||
-      (unexpectedArgs.length === 1 && unexpectedArgs[0] !== '--defaults')
-    ) {
-      throw new Error('usage: gis init [--defaults]');
-    }
-    return initializeProject({ defaults: unexpectedArgs[0] === '--defaults' });
+    return runInitCommand(unexpectedArgs);
   }
 
   if (command === 'slop') {
-    const options = parseSlopOptions(unexpectedArgs);
-    const comparison = await measureWorktreeSlop(
-      process.cwd(),
-      options.base ?? (await configuredSlopBase(process.cwd())),
-    );
-    console.log(serializeSlopReport(comparison));
-    if (
-      !options.reportOnly &&
-      (comparison.verbosityDelta > options.maxDelta ||
-        comparison.erosionDelta > options.maxDelta)
-    ) {
-      throw new Error(`slop score regressed by more than ${options.maxDelta}`);
-    }
-    return;
+    return runSlopCommand(unexpectedArgs);
   }
 
   if (command !== 'run' || unexpectedArgs.length > 0) {
     throw new Error('usage: gis <init [--defaults] | run | slop>');
   }
 
-  const cwd = process.cwd();
-  const config = await loadConfig(cwd);
-  await reconcileStartup({ cwd, baseBranch: config.base });
-  const recovered = await recoverLateCompletions({ cwd, config });
-  return runForegroundLoop({ cwd, config, initialMerged: recovered });
+  return runRunCommand();
 }
 
 const isEntryPoint =

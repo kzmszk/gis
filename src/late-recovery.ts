@@ -89,6 +89,74 @@ async function currentResult(worktreePath: string) {
   return result.kind === 'success' ? result : undefined;
 }
 
+/** The transcript recorded on the bead itself, or the default unresolved path. */
+function transcriptPathFor(bead: Bead, worktreePath: string): string {
+  const fallback = resolve(
+    worktreePath,
+    '.gis',
+    'run',
+    'transcript.unresolved',
+  );
+  if (typeof bead.notes !== 'string') return fallback;
+  return /^transcript: (.+)$/m.exec(bead.notes)?.[1] ?? fallback;
+}
+
+interface BeadRecoveryContext {
+  readonly cwd: string;
+  readonly baseBranch: string;
+  readonly worktrees: readonly GitWorktree[];
+  readonly snapshot: SessionSnapshot;
+  readonly mergeGit: MergeGitSource;
+  readonly herdr: LateRecoveryHerdrSource;
+  readonly queue: SerialMergeQueue;
+  readonly report: (message: string) => void;
+}
+
+/**
+ * Resume one late-committed bead if its worktree is still retained, has a
+ * live workspace, and holds a commit and a successful result to enqueue.
+ * Any failure along the way is reported and treated as "not recovered" —
+ * the bead stays blocked for the next reconciliation pass to retry.
+ */
+async function recoverBead(
+  bead: Bead,
+  context: BeadRecoveryContext,
+): Promise<boolean> {
+  const retained = context.worktrees.find(
+    (worktree) => worktree.branch === bead.id,
+  );
+  if (retained === undefined) return false;
+  const worktreePath = resolve(context.cwd, retained.path);
+  const workspaceId = workspaceIdFor(context.snapshot, worktreePath);
+  if (workspaceId === undefined) return false;
+
+  try {
+    if (
+      !(await context.mergeGit.hasCommits(worktreePath, context.baseBranch))
+    ) {
+      return false;
+    }
+    if ((await currentResult(worktreePath)) === undefined) return false;
+    context.report(`gis: resuming late completion for ${bead.id}`);
+    const result = await context.queue.enqueue({
+      bead,
+      worktree: {
+        path: worktreePath,
+        runPath: resolve(worktreePath, '.gis', 'run'),
+        remove: () =>
+          context.herdr.worktreeRemove(workspaceId, { force: true }),
+      },
+      transcriptPath: transcriptPathFor(bead, worktreePath),
+    });
+    return result.status === 'merged';
+  } catch (error: unknown) {
+    context.report(
+      `gis: late completion recovery failed for ${bead.id}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return false;
+  }
+}
+
 /** Resume a branch that committed after GIS had already classified it blocked. */
 export async function recoverLateCompletions(
   options: LateRecoveryOptions,
@@ -113,41 +181,20 @@ export async function recoverLateCompletions(
     git: mergeGit,
     runVerify: options.runVerify,
   });
-  let merged = 0;
+  const context: BeadRecoveryContext = {
+    cwd: options.cwd,
+    baseBranch: options.config.base,
+    worktrees,
+    snapshot: snapshotResult.snapshot,
+    mergeGit,
+    herdr,
+    queue,
+    report,
+  };
 
+  let merged = 0;
   for (const bead of blocked.filter(isLateCommitCandidate)) {
-    const retained = worktrees.find(
-      (worktree: GitWorktree) => worktree.branch === bead.id,
-    );
-    if (retained === undefined) continue;
-    const worktreePath = resolve(options.cwd, retained.path);
-    const workspaceId = workspaceIdFor(snapshotResult.snapshot, worktreePath);
-    if (workspaceId === undefined) continue;
-    try {
-      if (!(await mergeGit.hasCommits(worktreePath, options.config.base))) {
-        continue;
-      }
-      if ((await currentResult(worktreePath)) === undefined) continue;
-      report(`gis: resuming late completion for ${bead.id}`);
-      const result = await queue.enqueue({
-        bead,
-        worktree: {
-          path: worktreePath,
-          runPath: resolve(worktreePath, '.gis', 'run'),
-          remove: () => herdr.worktreeRemove(workspaceId, { force: true }),
-        },
-        transcriptPath:
-          typeof bead.notes === 'string'
-            ? (/^transcript: (.+)$/m.exec(bead.notes)?.[1] ??
-              resolve(worktreePath, '.gis', 'run', 'transcript.unresolved'))
-            : resolve(worktreePath, '.gis', 'run', 'transcript.unresolved'),
-      });
-      if (result.status === 'merged') merged += 1;
-    } catch (error: unknown) {
-      report(
-        `gis: late completion recovery failed for ${bead.id}: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
+    if (await recoverBead(bead, context)) merged += 1;
   }
   return merged;
 }

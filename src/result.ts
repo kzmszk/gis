@@ -141,6 +141,36 @@ export function parseWorkerResult(
     : { kind: 'failure', result };
 }
 
+type ResultWithRunId = Extract<
+  ResultFileState,
+  { readonly kind: 'success' | 'failure' | 'needs_human' }
+>;
+
+function hasResult(parsed: ResultFileState): parsed is ResultWithRunId {
+  return (
+    parsed.kind === 'success' ||
+    parsed.kind === 'failure' ||
+    parsed.kind === 'needs_human'
+  );
+}
+
+/** Build the `stale` state once a parsed result's run_id misses the expected one. */
+function staleResult(
+  path: string,
+  expectedRunId: string,
+  parsed: ResultWithRunId,
+): ResultFileState {
+  return {
+    kind: 'stale',
+    path,
+    expectedRunId,
+    actualRunId:
+      typeof parsed.result.run_id === 'string'
+        ? parsed.result.run_id
+        : undefined,
+  };
+}
+
 /** Read and classify the result file written by a worker. */
 export async function readWorkerResult(
   path: string,
@@ -165,20 +195,10 @@ export async function readWorkerResult(
   const parsed = parseWorkerResult(contents, path);
   if (
     expectedRunId !== undefined &&
-    (parsed.kind === 'success' ||
-      parsed.kind === 'failure' ||
-      parsed.kind === 'needs_human') &&
+    hasResult(parsed) &&
     parsed.result.run_id !== expectedRunId
   ) {
-    return {
-      kind: 'stale',
-      path,
-      expectedRunId,
-      actualRunId:
-        typeof parsed.result.run_id === 'string'
-          ? parsed.result.run_id
-          : undefined,
-    };
+    return staleResult(path, expectedRunId, parsed);
   }
   return parsed;
 }

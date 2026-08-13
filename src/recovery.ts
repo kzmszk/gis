@@ -268,6 +268,92 @@ function isWorkerWorktree(worktree: GitWorktree, baseBranch: string): boolean {
   );
 }
 
+interface NormalizedWorktree {
+  readonly worktree: GitWorktree;
+  readonly path: string;
+}
+
+interface InProgressReconciliationContext {
+  readonly normalizedWorktrees: readonly NormalizedWorktree[];
+  readonly livePaths: ReadonlySet<string>;
+  readonly beads: BeadsRecoverySource;
+  readonly report: (message: string) => void;
+  readonly reopenedIssueIds: string[];
+  readonly blockedIssueIds: string[];
+}
+
+/**
+ * Reconcile one in-progress bead against the live Herdr snapshot: leave it
+ * alone if its pane is still live, mark it blocked if its worktree survived
+ * without a pane, or reopen it if the worktree is gone entirely. Pushes the
+ * bead id onto the matching context array rather than returning, so the
+ * caller's loop stays a plain await with nothing left to branch on.
+ */
+async function reconcileInProgressBead(
+  bead: Bead,
+  context: InProgressReconciliationContext,
+): Promise<void> {
+  const hasLivePane = context.normalizedWorktrees.some(
+    ({ worktree, path }) =>
+      worktree.branch === bead.id && context.livePaths.has(path),
+  );
+  if (hasLivePane) {
+    return;
+  }
+
+  const retained = context.normalizedWorktrees.find(
+    ({ worktree }) => worktree.branch === bead.id,
+  );
+  if (retained !== undefined) {
+    const runPath = join(retained.path, '.gis', 'run');
+    await context.beads.markBlocked(bead.id, {
+      worktreePath: retained.path,
+      roundLogPath: runPath,
+      transcriptPath: join(runPath, 'transcript-recovery.unresolved'),
+      failurePhase: 'startup recovery',
+      failureDetail: 'worktree exists but no live herdr pane was found',
+    });
+    context.blockedIssueIds.push(bead.id);
+    context.report(
+      `retained worktree ${retained.path} for ${bead.id} has no live pane; marked blocked`,
+    );
+    return;
+  }
+
+  await context.beads.update(bead.id, { status: 'open' });
+  context.reopenedIssueIds.push(bead.id);
+}
+
+interface OrphanDetectionContext {
+  readonly baseBranch: string;
+  readonly livePaths: ReadonlySet<string>;
+  readonly inProgressIds: ReadonlySet<string>;
+  readonly report: (message: string) => void;
+}
+
+/** Return a live worker worktree that no in-progress bead still claims. */
+function collectOrphanedWorktree(
+  worktree: GitWorktree,
+  path: string,
+  context: OrphanDetectionContext,
+): OrphanedWorktree | undefined {
+  if (
+    !isWorkerWorktree(worktree, context.baseBranch) ||
+    !context.livePaths.has(path)
+  ) {
+    return undefined;
+  }
+  const branch = worktree.branch!;
+  if (context.inProgressIds.has(branch)) {
+    return undefined;
+  }
+
+  context.report(
+    `orphaned live pane for worktree ${path} (branch ${branch}); leaving it in place for human review`,
+  );
+  return { path, branch };
+}
+
 export async function reconcileStartup(
   options: StartupReconciliationOptions = {},
 ): Promise<StartupReconciliationReport> {
@@ -292,54 +378,31 @@ export async function reconcileStartup(
   const inProgressIds = new Set(inProgress.map((bead) => bead.id));
   const reopenedIssueIds: string[] = [];
   const blockedIssueIds: string[] = [];
+  const inProgressContext: InProgressReconciliationContext = {
+    normalizedWorktrees,
+    livePaths,
+    beads,
+    report,
+    reopenedIssueIds,
+    blockedIssueIds,
+  };
 
   for (const bead of inProgress) {
-    const hasLivePane = normalizedWorktrees.some(
-      ({ worktree, path }) =>
-        worktree.branch === bead.id && livePaths.has(path),
-    );
-    if (hasLivePane) {
-      continue;
-    }
-
-    const retained = normalizedWorktrees.find(
-      ({ worktree }) => worktree.branch === bead.id,
-    );
-    if (retained !== undefined) {
-      const runPath = join(retained.path, '.gis', 'run');
-      await beads.markBlocked(bead.id, {
-        worktreePath: retained.path,
-        roundLogPath: runPath,
-        transcriptPath: join(runPath, 'transcript-recovery.unresolved'),
-        failurePhase: 'startup recovery',
-        failureDetail: 'worktree exists but no live herdr pane was found',
-      });
-      blockedIssueIds.push(bead.id);
-      report(
-        `retained worktree ${retained.path} for ${bead.id} has no live pane; marked blocked`,
-      );
-      continue;
-    }
-
-    await beads.update(bead.id, { status: 'open' });
-    reopenedIssueIds.push(bead.id);
+    await reconcileInProgressBead(bead, inProgressContext);
   }
 
   const orphanedWorktrees: OrphanedWorktree[] = [];
+  const orphanContext: OrphanDetectionContext = {
+    baseBranch,
+    livePaths,
+    inProgressIds,
+    report,
+  };
   for (const { worktree, path } of normalizedWorktrees) {
-    if (!isWorkerWorktree(worktree, baseBranch) || !livePaths.has(path)) {
-      continue;
+    const orphan = collectOrphanedWorktree(worktree, path, orphanContext);
+    if (orphan !== undefined) {
+      orphanedWorktrees.push(orphan);
     }
-    const branch = worktree.branch!;
-    if (inProgressIds.has(branch)) {
-      continue;
-    }
-
-    const orphan = { path, branch };
-    orphanedWorktrees.push(orphan);
-    report(
-      `orphaned live pane for worktree ${path} (branch ${branch}); leaving it in place for human review`,
-    );
   }
 
   return { reopenedIssueIds, blockedIssueIds, orphanedWorktrees };

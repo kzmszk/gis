@@ -180,6 +180,44 @@ export function buildAgentStartArgs(
 
 export const buildStartArgs = buildAgentStartArgs;
 
+/** True when a candidate has a free worker slot and is not excluded. */
+function isCandidateEligible(
+  candidate: ProfileCandidate,
+  options: CandidateSelectionOptions,
+  config: Pick<GisConfig, 'kinds'>,
+): boolean {
+  return (
+    isAvailable(options.availableKinds ?? config.kinds, candidate.kind) &&
+    !includesKind(options.excludeKinds, candidate.kind)
+  );
+}
+
+type CandidateAttempt<T> =
+  | { readonly outcome: 'started'; readonly result: T }
+  | { readonly outcome: 'failed'; readonly error: unknown }
+  | { readonly outcome: 'rethrow'; readonly error: unknown };
+
+/** Start one candidate, classifying a rejection as fallback-eligible or fatal. */
+async function attemptCandidateStart<T>(
+  candidate: ProfileCandidate,
+  config: Pick<GisConfig, 'claude_permission_mode'>,
+  start: ProfileAgentStarter<T>,
+  shouldFallback: ((error: unknown) => boolean) | undefined,
+): Promise<CandidateAttempt<T>> {
+  try {
+    const result = await start(
+      candidate,
+      buildAgentStartArgs(candidate, config),
+    );
+    return { outcome: 'started', result };
+  } catch (error: unknown) {
+    if (shouldFallback !== undefined && !shouldFallback(error)) {
+      return { outcome: 'rethrow', error };
+    }
+    return { outcome: 'failed', error };
+  }
+}
+
 /**
  * Start a worker using the first available profile candidate and fall back only
  * when the start operation itself rejects. No pane output or result files are
@@ -198,30 +236,25 @@ export async function startWithProfileFallback<T>(
   let hasError = false;
 
   for (const candidate of candidates) {
-    if (
-      !isAvailable(options.availableKinds ?? config.kinds, candidate.kind) ||
-      includesKind(options.excludeKinds, candidate.kind)
-    ) {
+    if (!isCandidateEligible(candidate, options, config)) {
       continue;
     }
 
     attempts += 1;
-    try {
-      const result = await start(
-        candidate,
-        buildAgentStartArgs(candidate, config),
-      );
-      return { profile, candidate, result, attempts };
-    } catch (error: unknown) {
-      if (
-        options.shouldFallback !== undefined &&
-        !options.shouldFallback(error)
-      ) {
-        throw error;
-      }
-      hasError = true;
-      lastError = error;
+    const attempt = await attemptCandidateStart(
+      candidate,
+      config,
+      start,
+      options.shouldFallback,
+    );
+    if (attempt.outcome === 'started') {
+      return { profile, candidate, result: attempt.result, attempts };
     }
+    if (attempt.outcome === 'rethrow') {
+      throw attempt.error;
+    }
+    hasError = true;
+    lastError = attempt.error;
   }
 
   if (hasError) {
