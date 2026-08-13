@@ -268,20 +268,24 @@ export class SerialMergeQueue {
     return results;
   }
 
-  private async process(item: MergeQueueItem): Promise<MergeResult> {
-    requireNonEmpty(item.bead.id, 'bead.id');
-    requireNonEmpty(item.worktree.path, 'worktree.path');
-    requireNonEmpty(item.worktree.runPath, 'worktree.runPath');
-    requireNonEmpty(item.transcriptPath, 'transcriptPath');
-
-    const handoff = handoffFor(item);
-
+  /** Rebase the bead worktree onto base, or block on the first failure. */
+  private async rebaseOrBlock(
+    item: MergeQueueItem,
+    handoff: BeadHandoffLocations,
+  ): Promise<MergeBlockedResult | undefined> {
     try {
       await this.git.rebase(item.worktree.path, this.options.baseBranch);
+      return undefined;
     } catch (error: unknown) {
       return this.blocked(item, handoff, 'rebase', error);
     }
+  }
 
+  /** Require a real commit ahead of base, and reject GIS runtime artifacts. */
+  private async guardCommitOrBlock(
+    item: MergeQueueItem,
+    handoff: BeadHandoffLocations,
+  ): Promise<MergeBlockedResult | undefined> {
     try {
       if (
         !(await this.git.hasCommits(
@@ -313,10 +317,20 @@ export class SerialMergeQueue {
           ),
         );
       }
+      return undefined;
     } catch (error: unknown) {
       return this.blocked(item, handoff, 'commit', error);
     }
+  }
 
+  /** Run verification, blocking on a runner failure or a failed result. */
+  private async runVerificationOrBlock(
+    item: MergeQueueItem,
+    handoff: BeadHandoffLocations,
+  ): Promise<
+    | { readonly blocked: MergeBlockedResult }
+    | { readonly verification: VerifyCommandResult }
+  > {
     let verification: VerifyCommandResult;
     try {
       verification = await this.runVerify(
@@ -325,23 +339,59 @@ export class SerialMergeQueue {
         parseDurationMs(this.options.verifyTimeout, 'verify_timeout'),
       );
     } catch (error: unknown) {
-      return this.blocked(item, handoff, 'verify', error);
+      return { blocked: await this.blocked(item, handoff, 'verify', error) };
     }
     if (!verification.passed) {
-      return this.blocked(
-        item,
-        handoff,
-        'verify',
-        new Error(verifyFailure(verification)),
-        verification,
-      );
+      return {
+        blocked: await this.blocked(
+          item,
+          handoff,
+          'verify',
+          new Error(verifyFailure(verification)),
+          verification,
+        ),
+      };
     }
+    return { verification };
+  }
 
+  /** Fast-forward merge the bead branch into the base worktree, or block. */
+  private async mergeOrBlock(
+    item: MergeQueueItem,
+    handoff: BeadHandoffLocations,
+    verification: VerifyCommandResult,
+  ): Promise<MergeBlockedResult | undefined> {
     try {
       await this.git.merge(this.options.repositoryPath, item.bead.id);
+      return undefined;
     } catch (error: unknown) {
       return this.blocked(item, handoff, 'merge', error, verification);
     }
+  }
+
+  private async process(item: MergeQueueItem): Promise<MergeResult> {
+    requireNonEmpty(item.bead.id, 'bead.id');
+    requireNonEmpty(item.worktree.path, 'worktree.path');
+    requireNonEmpty(item.worktree.runPath, 'worktree.runPath');
+    requireNonEmpty(item.transcriptPath, 'transcriptPath');
+
+    const handoff = handoffFor(item);
+
+    const rebaseBlocked = await this.rebaseOrBlock(item, handoff);
+    if (rebaseBlocked !== undefined) return rebaseBlocked;
+
+    const commitBlocked = await this.guardCommitOrBlock(item, handoff);
+    if (commitBlocked !== undefined) return commitBlocked;
+
+    const verificationOrBlock = await this.runVerificationOrBlock(
+      item,
+      handoff,
+    );
+    if ('blocked' in verificationOrBlock) return verificationOrBlock.blocked;
+    const { verification } = verificationOrBlock;
+
+    const mergeBlocked = await this.mergeOrBlock(item, handoff, verification);
+    if (mergeBlocked !== undefined) return mergeBlocked;
 
     // These are intentionally after merge and never occur on a pre-merge
     // failure. Worktree removal is the final side effect of a successful bead.
