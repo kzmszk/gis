@@ -22,7 +22,7 @@ import {
   type BeadJobWorktreeSource,
   type JobOutcome,
 } from './run-worker.js';
-import { assertNever, delay } from './internal.js';
+import { assertNever, delay, requirePositiveInteger } from './internal.js';
 import { HumanGateTracker } from './run-human-gate.js';
 
 export interface RunBeadsSource extends BeadJobBeadsSource {
@@ -72,12 +72,6 @@ export interface RunSummary {
 }
 
 export { formatHumanGateNotification } from './run-human-gate.js';
-
-function requirePositiveInteger(value: number, name: string): void {
-  if (!Number.isSafeInteger(value) || value <= 0) {
-    throw new RangeError(`${name} must be a positive integer`);
-  }
-}
 
 function dispatchableReady(beads: readonly Bead[]): Bead[] {
   return beads

@@ -25,6 +25,7 @@ import {
   type WorkerResultProblem,
 } from './result.js';
 import type { BeadWorktree } from './worktree.js';
+import { delay, errorMessage } from './internal.js';
 
 export type ReviewLoopOutcome = 'approved' | 'blocked' | 'human';
 
@@ -73,10 +74,6 @@ export type ReviewProblem = Exclude<
   | { readonly kind: 'needs_human' }
 >;
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 function assertNever(value: never): never {
   throw new Error(`unhandled review result: ${JSON.stringify(value)}`);
 }
@@ -107,16 +104,15 @@ export function requestedChangesFeedback(
     : feedback;
 }
 
-function delay(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
-}
-
 /**
  * Poll `read` until it reports a state other than "not written yet"
  * (missing/stale), or until `timeout` elapses. On timeout the last
  * missing/stale state is returned as-is so callers can report it.
+ *
+ * @internal Exported only for deterministic timer testing. Production code
+ * outside this module must use the role-specific wait functions below.
  */
-async function pollUntilTerminal<T extends { readonly kind: string }>(
+export async function pollUntilTerminal<T extends { readonly kind: string }>(
   read: () => Promise<T>,
   timeout: string,
 ): Promise<T> {

@@ -11,6 +11,7 @@ import {
   startReviewer,
 } from '../dist/review.js';
 import {
+  pollUntilTerminal,
   requestedChangesFeedback,
   reviewProblemDetail,
   runReviewLoop,
@@ -102,6 +103,22 @@ test('parses reviewer verdicts and rejects malformed review results', () => {
   assert.equal(
     parseReviewResult('{"status":"done","summary":"missing verdict"}').kind,
     'invalid_schema',
+  );
+  assert.deepEqual(
+    parseReviewResult(
+      JSON.stringify({
+        run_id: '',
+        status: 'nope',
+        summary: '',
+        verdict: 'nope',
+      }),
+    ).issues,
+    [
+      'run_id must be a non-empty string',
+      'status must be "done" or "failed"',
+      'summary must be a non-empty string',
+      'verdict must be "approved" or "changes_requested"',
+    ],
   );
 });
 
@@ -1071,6 +1088,33 @@ function readyReviewerHerdr({ reviewerName, agentKind = 'claude', onPrompt }) {
     },
   };
 }
+
+test('clamps a poll delay to the remaining timeout', async () => {
+  const waits = [];
+  let reads = 0;
+  let now = 0;
+  const originalNow = Date.now;
+  const originalSetTimeout = globalThis.setTimeout;
+  try {
+    Date.now = () => now;
+    globalThis.setTimeout = (callback, milliseconds, ...args) => {
+      waits.push(milliseconds);
+      now += milliseconds;
+      callback(...args);
+      return 0;
+    };
+    const result = await pollUntilTerminal(async () => {
+      reads += 1;
+      return reads === 1 ? { kind: 'missing' } : { kind: 'success' };
+    }, '100ms');
+
+    assert.deepEqual(result, { kind: 'success' });
+    assert.deepEqual(waits, [100]);
+  } finally {
+    Date.now = originalNow;
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
 
 test('blocks without starting a reviewer when herdr pane.split is unavailable', async () => {
   const root = await mkdtemp(join(tmpdir(), 'gis-review-nosplit-'));

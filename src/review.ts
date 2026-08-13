@@ -6,6 +6,11 @@ import {
   startWithProfileFallback,
   type ProfileStartResult,
 } from './profiles.js';
+import {
+  requireNonEmpty,
+  validateResultSchema,
+  type SharedResultField,
+} from './internal.js';
 import { type PaneSplitOptions, type PaneSplitResult } from './herdr.js';
 import {
   startWorker,
@@ -93,12 +98,6 @@ export interface StartedReviewer {
   readonly paneId: string;
   readonly agentName: string;
   readonly selection: ProfileStartResult<StartedWorker>;
-}
-
-function requireNonEmpty(value: string, name: string): void {
-  if (typeof value !== 'string' || value.trim().length === 0) {
-    throw new TypeError(`${name} must not be empty`);
-  }
 }
 
 function reviewAgentName(beadId: string): string {
@@ -242,22 +241,23 @@ export async function promptReviewer(
 }
 
 function schemaIssues(value: unknown): string[] {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-    return ['review result must be a JSON object'];
-  }
-  const record = value as Record<string, unknown>;
+  const validation = validateResultSchema(value, 'review result');
+  if (validation.kind === 'not_object') return [validation.issue];
+  const { record } = validation;
+  const sharedIssues = {
+    status: validation.issues.status,
+    summary: validation.issues.summary,
+    needs_human: validation.issues.needs_human,
+  } satisfies Readonly<Record<SharedResultField, string | undefined>>;
   const issues: string[] = [];
   if (typeof record.run_id !== 'string' || record.run_id.trim().length === 0) {
     issues.push('run_id must be a non-empty string');
   }
-  if (record.status !== 'done' && record.status !== 'failed') {
-    issues.push('status must be "done" or "failed"');
+  if (sharedIssues.status !== undefined) {
+    issues.push(sharedIssues.status);
   }
-  if (
-    typeof record.summary !== 'string' ||
-    record.summary.trim().length === 0
-  ) {
-    issues.push('summary must be a non-empty string');
+  if (sharedIssues.summary !== undefined) {
+    issues.push(sharedIssues.summary);
   }
   if (record.verdict !== 'approved' && record.verdict !== 'changes_requested') {
     issues.push('verdict must be "approved" or "changes_requested"');
@@ -268,12 +268,8 @@ function schemaIssues(value: unknown): string[] {
   ) {
     issues.push('feedback must be a non-empty string when present');
   }
-  if (
-    record.needs_human !== undefined &&
-    (typeof record.needs_human !== 'string' ||
-      record.needs_human.trim().length === 0)
-  ) {
-    issues.push('needs_human must be a non-empty string when present');
+  if (sharedIssues.needs_human !== undefined) {
+    issues.push(sharedIssues.needs_human);
   }
   return issues;
 }

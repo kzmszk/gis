@@ -1,4 +1,5 @@
 import { readFile } from 'node:fs/promises';
+import { requireNonEmpty, validateResultSchema } from './internal.js';
 
 export type WorkerResultStatus = 'done' | 'failed';
 
@@ -52,16 +53,6 @@ export type WorkerResultProblem = Exclude<
   { readonly kind: 'success' } | { readonly kind: 'needs_human' }
 >;
 
-function requirePath(path: string): void {
-  if (typeof path !== 'string' || path.trim().length === 0) {
-    throw new TypeError('result path must not be empty');
-  }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
 function assertNever(value: never): never {
   throw new Error(`unhandled worker result: ${JSON.stringify(value)}`);
 }
@@ -84,25 +75,11 @@ export function workerResultProblemDetail(result: WorkerResultProblem): string {
 }
 
 function schemaIssues(value: unknown): string[] {
-  if (!isRecord(value)) {
-    return ['result must be a JSON object'];
-  }
-
-  const issues: string[] = [];
-  if (value.status !== 'done' && value.status !== 'failed') {
-    issues.push('status must be "done" or "failed"');
-  }
-  if (typeof value.summary !== 'string' || value.summary.trim().length === 0) {
-    issues.push('summary must be a non-empty string');
-  }
-  if (
-    value.needs_human !== undefined &&
-    (typeof value.needs_human !== 'string' ||
-      value.needs_human.trim().length === 0)
-  ) {
-    issues.push('needs_human must be a non-empty string when present');
-  }
-  return issues;
+  const validation = validateResultSchema(value, 'result');
+  if (validation.kind === 'not_object') return [validation.issue];
+  return Object.values(validation.issues).filter(
+    (issue): issue is string => issue !== undefined,
+  );
 }
 
 function asWorkerResult(value: Record<string, unknown>): WorkerResult {
@@ -114,7 +91,7 @@ export function parseWorkerResult(
   contents: string,
   path = '<result>',
 ): ResultFileState {
-  requirePath(path);
+  requireNonEmpty(path, 'result path');
 
   let value: unknown;
   try {
@@ -176,7 +153,7 @@ export async function readWorkerResult(
   path: string,
   expectedRunId?: string,
 ): Promise<ResultFileState> {
-  requirePath(path);
+  requireNonEmpty(path, 'result path');
 
   let contents: string;
   try {

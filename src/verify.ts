@@ -4,6 +4,7 @@ import { promisify } from 'node:util';
 import type { Bead, BeadHandoffLocations } from './beads.js';
 import { parseDurationMs, type GisConfig } from './config.js';
 import { SLOP_REPORT_PREFIX, type SlopScore } from './slop.js';
+import { requireNonEmpty, requirePositiveInteger, text } from './internal.js';
 import {
   promptWorker,
   type VerificationCycle,
@@ -77,26 +78,6 @@ export interface VerifyLoopBlockedResult {
 export type VerifyLoopResult =
   | VerifyLoopVerifiedResult
   | VerifyLoopBlockedResult;
-
-function requireNonEmpty(value: string, name: string): void {
-  if (typeof value !== 'string' || value.trim().length === 0) {
-    throw new TypeError(`${name} must not be empty`);
-  }
-}
-
-function requirePositiveInteger(value: number, name: string): void {
-  if (!Number.isSafeInteger(value) || value <= 0) {
-    throw new RangeError(`${name} must be a positive integer`);
-  }
-}
-
-function text(value: unknown): string {
-  return typeof value === 'string'
-    ? value
-    : value instanceof Buffer
-      ? value.toString('utf8')
-      : '';
-}
 
 function isSlopReport(value: unknown): value is SlopReport {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {

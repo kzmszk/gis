@@ -4,6 +4,7 @@ import { createInterface } from 'node:readline';
 import { homedir } from 'node:os';
 import { basename, extname, isAbsolute, join, resolve } from 'node:path';
 import type { AgentSessionInfo } from './herdr.js';
+import { requireNonEmpty } from './internal.js';
 
 export type TranscriptKind = 'claude' | 'codex';
 
@@ -37,12 +38,6 @@ export interface BeadTranscriptIndex {
 }
 
 const DEFAULT_METADATA_LINES = 8;
-
-function requireNonEmpty(value: string, name: string): void {
-  if (typeof value !== 'string' || value.trim().length === 0) {
-    throw new TypeError(`${name} must not be empty`);
-  }
-}
 
 function absoluteCwd(cwd: string): string {
   requireNonEmpty(cwd, 'cwd');
