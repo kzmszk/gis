@@ -394,59 +394,59 @@ async function beforeDeadline<T>(
   }
 }
 
-/** True once a snapshot entry is the agent this start call is tracking. */
-function matchesStartedAgent(
+/**
+ * Where a snapshot agent stands relative to the one `waitForNamedAgentReady`
+ * is tracking. `idle-pending` carries the sequence number that state was
+ * observed at, so the caller's idle-fallback window can key off it without a
+ * `matches`-style flag (and the non-null assertion that flag used to force)
+ * crossing a function boundary.
+ */
+type AgentReadinessState =
+  | { readonly kind: 'unmatched' }
+  | { readonly kind: 'ready' }
+  | { readonly kind: 'idle-pending'; readonly seq: number }
+  | { readonly kind: 'waiting' };
+
+/**
+ * Classify one snapshot entry against the agent this start call is
+ * tracking. Does the name/kind/state_change_seq match once, here, so every
+ * other arm can rely on the agent (and, for `idle-pending`, the sequence
+ * number) already being narrowed rather than re-deriving it.
+ */
+function classifyAgentReadiness(
   agent: AgentInfo | undefined,
   name: string,
   kind: string,
-  stateChangeSeq: number | undefined,
   previousStateChangeSeq: number,
-): boolean {
-  return (
-    agent?.name === name &&
-    agent?.agent === kind &&
-    typeof stateChangeSeq === 'number' &&
-    stateChangeSeq > previousStateChangeSeq
-  );
-}
+): AgentReadinessState {
+  if (agent === undefined) {
+    return { kind: 'unmatched' };
+  }
+  const stateChangeSeq = agent.state_change_seq;
+  if (
+    agent.name !== name ||
+    agent.agent !== kind ||
+    typeof stateChangeSeq !== 'number' ||
+    stateChangeSeq <= previousStateChangeSeq
+  ) {
+    return { kind: 'unmatched' };
+  }
 
-/** True once the tracked agent has finished starting and accepts input. */
-function isReadyForPrompt(
-  agent: AgentInfo | undefined,
-  matches: boolean,
-): boolean {
-  if (!matches || agent === undefined) return false;
   const launchIsSettled =
     agent.agent_status === 'idle' || agent.agent_status === 'done';
-  return (
+  if (
     agent.interactive_ready === true &&
     agent.launch_pending !== true &&
     launchIsSettled
-  );
-}
-
-/**
- * The tracked agent's state_change_seq while it is in the idle-but-still-
- * launch_pending state some Herdr versions leave, or `undefined` when that
- * state does not apply. Returning the sequence number (rather than a plain
- * boolean) keeps its "is a number" proof visible to the caller instead of
- * requiring a non-null assertion once matchesStartedAgent's own check is out
- * of scope.
- */
-function idleLaunchPendingSeq(
-  agent: AgentInfo | undefined,
-  matches: boolean,
-  stateChangeSeq: number | undefined,
-): number | undefined {
-  if (
-    !matches ||
-    agent === undefined ||
-    agent.launch_pending !== true ||
-    agent.agent_status !== 'idle'
   ) {
-    return undefined;
+    return { kind: 'ready' };
   }
-  return stateChangeSeq;
+
+  if (agent.launch_pending === true && agent.agent_status === 'idle') {
+    return { kind: 'idle-pending', seq: stateChangeSeq };
+  }
+
+  return { kind: 'waiting' };
 }
 
 async function waitForNamedAgentReady(
@@ -468,30 +468,31 @@ async function waitForNamedAgentReady(
     const agent = snapshot.agents.find(
       (candidate) => candidate.pane_id === paneId,
     );
-    const stateChangeSeq = agent?.state_change_seq;
-    const matches = matchesStartedAgent(
+    const readiness = classifyAgentReadiness(
       agent,
       name,
       kind,
-      stateChangeSeq,
       previousStateChangeSeq,
     );
 
-    if (isReadyForPrompt(agent, matches)) {
-      return;
-    }
-
-    const idleSeq = idleLaunchPendingSeq(agent, matches, stateChangeSeq);
-    if (idleSeq !== undefined) {
-      const now = Date.now();
-      if (stableIdle === undefined || stableIdle.stateChangeSeq !== idleSeq) {
-        stableIdle = { stateChangeSeq: idleSeq, since: now };
-      }
-      if (now - stableIdle.since >= idleFallbackMs) {
+    switch (readiness.kind) {
+      case 'ready':
         return;
+      case 'idle-pending': {
+        const now = Date.now();
+        if (
+          stableIdle === undefined ||
+          stableIdle.stateChangeSeq !== readiness.seq
+        ) {
+          stableIdle = { stateChangeSeq: readiness.seq, since: now };
+        }
+        if (now - stableIdle.since >= idleFallbackMs) {
+          return;
+        }
+        break;
       }
-    } else {
-      stableIdle = undefined;
+      default:
+        stableIdle = undefined;
     }
 
     const remainingMs = remainingTime(deadline);

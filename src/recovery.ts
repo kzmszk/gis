@@ -278,27 +278,27 @@ interface InProgressReconciliationContext {
   readonly livePaths: ReadonlySet<string>;
   readonly beads: BeadsRecoverySource;
   readonly report: (message: string) => void;
-  readonly reopenedIssueIds: string[];
-  readonly blockedIssueIds: string[];
 }
+
+/** What `reconcileInProgressBead` observed and did for one in-progress bead. */
+type InProgressReconciliationOutcome = 'live' | 'blocked' | 'reopened';
 
 /**
  * Reconcile one in-progress bead against the live Herdr snapshot: leave it
  * alone if its pane is still live, mark it blocked if its worktree survived
- * without a pane, or reopen it if the worktree is gone entirely. Pushes the
- * bead id onto the matching context array rather than returning, so the
- * caller's loop stays a plain await with nothing left to branch on.
+ * without a pane, or reopen it if the worktree is gone entirely. The caller
+ * aggregates the returned outcome into its own reopened/blocked id lists.
  */
 async function reconcileInProgressBead(
   bead: Bead,
   context: InProgressReconciliationContext,
-): Promise<void> {
+): Promise<InProgressReconciliationOutcome> {
   const hasLivePane = context.normalizedWorktrees.some(
     ({ worktree, path }) =>
       worktree.branch === bead.id && context.livePaths.has(path),
   );
   if (hasLivePane) {
-    return;
+    return 'live';
   }
 
   const retained = context.normalizedWorktrees.find(
@@ -313,15 +313,14 @@ async function reconcileInProgressBead(
       failurePhase: 'startup recovery',
       failureDetail: 'worktree exists but no live herdr pane was found',
     });
-    context.blockedIssueIds.push(bead.id);
     context.report(
       `retained worktree ${retained.path} for ${bead.id} has no live pane; marked blocked`,
     );
-    return;
+    return 'blocked';
   }
 
   await context.beads.update(bead.id, { status: 'open' });
-  context.reopenedIssueIds.push(bead.id);
+  return 'reopened';
 }
 
 interface OrphanDetectionContext {
@@ -383,12 +382,15 @@ export async function reconcileStartup(
     livePaths,
     beads,
     report,
-    reopenedIssueIds,
-    blockedIssueIds,
   };
 
   for (const bead of inProgress) {
-    await reconcileInProgressBead(bead, inProgressContext);
+    const outcome = await reconcileInProgressBead(bead, inProgressContext);
+    if (outcome === 'reopened') {
+      reopenedIssueIds.push(bead.id);
+    } else if (outcome === 'blocked') {
+      blockedIssueIds.push(bead.id);
+    }
   }
 
   const orphanedWorktrees: OrphanedWorktree[] = [];
