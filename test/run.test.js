@@ -539,6 +539,49 @@ test('does not dispatch an epic and reports existing human gates', async () => {
   ]);
 });
 
+test('resolves one report sink and shares it with human-gate notifications', async () => {
+  const sinks = [[], []];
+  let reportReads = 0;
+  const human = { ...bead('gis-vst.single-report'), labels: ['human'] };
+  let humanPolls = 0;
+  const options = {
+    cwd: '/repo',
+    config: config({ concurrency: 1 }),
+    beads: {
+      async ready() {
+        return [bead('gis-vst', 1, 'epic')];
+      },
+      async dispatch() {
+        throw new Error('epic must not be dispatched');
+      },
+      async markBlocked() {
+        throw new Error('no bead should be blocked');
+      },
+      async listHuman() {
+        humanPolls += 1;
+        return humanPolls === 1 ? [human] : [];
+      },
+    },
+  };
+  Object.defineProperty(options, 'report', {
+    get() {
+      // Return a different sink on every read to catch repeated resolution.
+      const sink = sinks[reportReads] ?? sinks.at(-1);
+      reportReads += 1;
+      return (message) => sink.push(message);
+    },
+  });
+
+  const result = await runForegroundLoop(options);
+
+  assert.equal(reportReads, 1);
+  assert.equal(sinks[0].length, 2);
+  assert.equal(sinks[1].length, 0);
+  assert.match(sinks[0][0], /人間の確認が必要です/);
+  assert.match(sinks[0][1], /0件マージ/);
+  assert.equal(result.humanWaiting, 0);
+});
+
 test('creates a human gate in the run loop when the worker requests confirmation', async () => {
   const resultRoot = await mkdtemp(join(tmpdir(), 'gis-run-human-'));
   const { worktrees, workers } = dependencies(resultRoot);

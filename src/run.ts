@@ -1,5 +1,5 @@
 import { createBeadsAdapter } from './beads.js';
-import type { Bead, BeadHandoffLocations } from './beads.js';
+import type { Bead } from './beads.js';
 import type { GisConfig } from './config.js';
 import { loadConfig } from './config.js';
 import { createHerdrAdapter } from './herdr.js';
@@ -109,38 +109,27 @@ function defaultWorkers(herdr: RunHerdrSource): RunWorkerSource {
   };
 }
 
-/** Resolve the reporting sink, independent of every other collaborator. */
-function resolveReport(options: RunOptions): (message: string) => void {
-  return options.report ?? ((message: string) => console.log(message));
-}
-
-/** Called when a worker itself raises a human gate, before its job is released. */
-type OnHumanGate = (gate: Bead, locations: BeadHandoffLocations) => void;
-
-/** What `runForegroundLoop` needs to dispatch and process ready beads. */
-interface Dispatcher {
+/** Context shared by the foreground loop and human gates. */
+interface ForegroundContext {
   /** Runs one bead to a terminal `JobOutcome`, retaining state for recovery on failure. */
   readonly processBead: (bead: Bead) => Promise<JobOutcome>;
   readonly beads: RunBeadsSource;
+  readonly humanGate: HumanGateTracker;
+  /** Report the final summary through the context's single sink. */
+  readonly reportSummary: (message: string) => void;
 }
 
 /**
- * Build the dispatcher `runForegroundLoop` schedules ready beads against.
+ * Build the foreground context `runForegroundLoop` schedules ready beads against.
  *
  * Resolves every optional `RunOptions` collaborator to a concrete adapter
  * (constructing the production implementation for anything the caller did
  * not supply) and wires them into a single `processBead` function via
- * `createBeadJobProcessor`. Interface: pass the raw `options`, the
- * already-resolved `cwd` and `config` (both required first since several
- * defaults, e.g. the merge queue and the beads adapter, are built from
- * them), the already-resolved `report` sink, and `onHumanGate`, invoked
- * when a worker raises a human checkpoint mid-job. Both `report` and
- * `onHumanGate` are taken as parameters rather than resolved here because
- * the caller typically needs `report` before it can build `onHumanGate`
- * (e.g. to feed a `HumanGateTracker`); resolving `report` via
- * `resolveReport` is independent of every other collaborator, so the
- * caller can do that once, share the single result with both `humanGate`
- * and this function, and never create a resolution cycle. No I/O beyond
+ * `createBeadJobProcessor`. Pass the raw `options` and already-resolved `cwd`
+ * and `config` (both required first since several defaults, e.g. the merge
+ * queue and beads adapter, are built from them). The context resolves the
+ * report sink once, constructs the HumanGateTracker with that same sink, and
+ * returns a context that owns all reporting. No I/O beyond
  * constructing in-memory adapter objects; the beads adapter is the only
  * default that touches the filesystem indirectly (via `createBeadsAdapter`'s
  * own lazy behavior). Throws `ConfigError` if `config.review` is enabled
@@ -154,13 +143,13 @@ interface Dispatcher {
  * `merge`), and the `createBeadJobProcessor` wiring back into
  * `runForegroundLoop`, its sole caller.
  */
-function createDispatcher(
+function createForegroundContext(
   options: RunOptions,
   cwd: string,
   config: GisConfig,
-  report: (message: string) => void,
-  onHumanGate: OnHumanGate,
-): Dispatcher {
+): ForegroundContext {
+  const report = options.report ?? ((message: string) => console.log(message));
+  const humanGate = new HumanGateTracker(report);
   const beads = options.beads ?? createBeadsAdapter({ cwd });
   const herdr = options.herdr ?? createHerdrAdapter();
   const worktrees =
@@ -210,10 +199,12 @@ function createDispatcher(
     merge,
     resolveTranscript,
     report,
-    onHumanGate,
+    onHumanGate: (gate, locations) => {
+      humanGate.recordFromWorker(gate, locations.worktreePath);
+    },
   });
 
-  return { processBead, beads };
+  return { processBead, beads, humanGate, reportSummary: report };
 }
 
 function resolveInitialMerged(options: RunOptions): number {
@@ -306,27 +297,18 @@ export async function runForegroundLoop(
   const config = options.config ?? (await loadConfig(cwd));
   requirePositiveInteger(config.concurrency, 'concurrency');
 
-  // Both option validations run before createDispatcher so that a caller
+  // Both option validations run before createForegroundContext so that a caller
   // passing several invalid options still sees the RangeError first, as it
   // did when createBeadJobProcessor (which can throw ConfigError) was wired
-  // up here rather than inside the dispatcher.
+  // up here rather than inside the context.
   const humanPollIntervalMs = resolveHumanPollIntervalMs(options);
   const counts: JobOutcomeCounts = {
     merged: resolveInitialMerged(options),
     blocked: 0,
   };
 
-  const report = resolveReport(options);
-  const humanGate = new HumanGateTracker(report);
-  const { processBead, beads } = createDispatcher(
-    options,
-    cwd,
-    config,
-    report,
-    (gate, locations) => {
-      humanGate.recordFromWorker(gate, locations.worktreePath);
-    },
-  );
+  const { processBead, beads, reportSummary, humanGate } =
+    createForegroundContext(options, cwd, config);
 
   const active = new Map<string, Promise<JobOutcome>>();
 
@@ -357,7 +339,7 @@ export async function runForegroundLoop(
     humanWaiting: remainingHumanBeads.size,
   };
   const result = { ...summary, text: formatRunSummary(summary) };
-  report(result.text);
+  reportSummary(result.text);
   return result;
 }
 
