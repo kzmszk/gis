@@ -29,6 +29,12 @@ bd close <id>         # Complete work
   The id is no longer hierarchical, but the issue still shows under CHILDREN and in
   `bd ready` with its parent. A PreToolUse hook in `.claude/settings.json` enforces this
   for Claude Code; other agents have to follow it by reading this. See gis-y2h.
+- **Always run `bd dolt push` with `DOLT_REMOTE_INFO_BRANCH=` set to empty.** Otherwise dolt
+  also force-pushes a marker branch to `refs/heads/__dolt_remote_info__`, which GitHub counts
+  as a real branch and turns into a "had recent pushes" banner on every visit. The empty value
+  disables that push; the issue data at `refs/dolt/data` is unaffected. `.husky/pre-push`
+  already exports it — set it in your shell profile (and in any cloud routine or second
+  machine) so manual pushes match. See gis-v3t.
 
 **Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git remote; `.beads/issues.jsonl` is a passive export. See https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md for details and anti-patterns.
 
