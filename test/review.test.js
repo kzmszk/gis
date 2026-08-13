@@ -122,6 +122,147 @@ test('parses reviewer verdicts and rejects malformed review results', () => {
   );
 });
 
+test('reports each review result schema violation independently', () => {
+  const valid = {
+    run_id: 'run-1',
+    status: 'done',
+    summary: 'all good',
+    verdict: 'approved',
+  };
+  const cases = [
+    [null, 'review result must be a JSON object'],
+    [[], 'review result must be a JSON object'],
+    ['review', 'review result must be a JSON object'],
+    [42, 'review result must be a JSON object'],
+    [true, 'review result must be a JSON object'],
+    (() => {
+      const value = { ...valid };
+      delete value.run_id;
+      return [value, 'run_id must be a non-empty string'];
+    })(),
+    [{ ...valid, run_id: '  ' }, 'run_id must be a non-empty string'],
+    [{ ...valid, run_id: 1 }, 'run_id must be a non-empty string'],
+    (() => {
+      const value = { ...valid };
+      delete value.status;
+      return [value, 'status must be "done" or "failed"'];
+    })(),
+    [{ ...valid, status: 'waiting' }, 'status must be "done" or "failed"'],
+    [{ ...valid, status: 1 }, 'status must be "done" or "failed"'],
+    (() => {
+      const value = { ...valid };
+      delete value.summary;
+      return [value, 'summary must be a non-empty string'];
+    })(),
+    [{ ...valid, summary: '' }, 'summary must be a non-empty string'],
+    [{ ...valid, summary: '  ' }, 'summary must be a non-empty string'],
+    [{ ...valid, summary: 1 }, 'summary must be a non-empty string'],
+    (() => {
+      const value = { ...valid };
+      delete value.verdict;
+      return [value, 'verdict must be "approved" or "changes_requested"'];
+    })(),
+    [
+      { ...valid, verdict: 'maybe' },
+      'verdict must be "approved" or "changes_requested"',
+    ],
+    [
+      { ...valid, verdict: 1 },
+      'verdict must be "approved" or "changes_requested"',
+    ],
+    [
+      { ...valid, feedback: '  ' },
+      'feedback must be a non-empty string when present',
+    ],
+    [
+      { ...valid, feedback: 1 },
+      'feedback must be a non-empty string when present',
+    ],
+    [
+      { ...valid, needs_human: false },
+      'needs_human must be a non-empty string when present',
+    ],
+    [
+      { ...valid, needs_human: '  ' },
+      'needs_human must be a non-empty string when present',
+    ],
+  ];
+
+  for (const [value, expectedIssue] of cases) {
+    const parsed = parseReviewResult(JSON.stringify(value));
+    assert.equal(parsed.kind, 'invalid_schema');
+    assert.deepEqual(parsed.issues, [expectedIssue]);
+  }
+});
+
+test('classifies malformed JSON and terminal review outcomes through the parser', () => {
+  const invalidJson = parseReviewResult('{"run_id":', 'review.json');
+  assert.equal(invalidJson.kind, 'invalid_json');
+  assert.equal(invalidJson.path, 'review.json');
+  assert.ok(invalidJson.message.length > 0);
+
+  const failedApproved = parseReviewResult(
+    JSON.stringify({
+      run_id: 'run-1',
+      status: 'failed',
+      summary: 'review crashed',
+      verdict: 'approved',
+    }),
+  );
+  assert.equal(failedApproved.kind, 'failure');
+  assert.equal(failedApproved.result.status, 'failed');
+  assert.equal(failedApproved.result.verdict, 'approved');
+
+  const failedChangesRequested = parseReviewResult(
+    JSON.stringify({
+      run_id: 'run-1',
+      status: 'failed',
+      summary: 'review crashed',
+      verdict: 'changes_requested',
+    }),
+  );
+  assert.equal(failedChangesRequested.kind, 'failure');
+  assert.equal(failedChangesRequested.result.verdict, 'changes_requested');
+
+  const changesRequested = parseReviewResult(
+    JSON.stringify({
+      run_id: 'run-1',
+      status: 'done',
+      summary: 'fix needed',
+      verdict: 'changes_requested',
+    }),
+  );
+  assert.equal(changesRequested.kind, 'changes_requested');
+  assert.equal(changesRequested.result.feedback, undefined);
+
+  const needsHuman = parseReviewResult(
+    JSON.stringify({
+      run_id: 'run-1',
+      status: 'failed',
+      summary: 'review paused',
+      verdict: 'changes_requested',
+      needs_human: 'choose whether to continue',
+    }),
+  );
+  assert.equal(needsHuman.kind, 'needs_human');
+  assert.equal(needsHuman.reason, 'choose whether to continue');
+});
+
+test('accepts unknown review result fields for forward compatibility', () => {
+  const parsed = parseReviewResult(
+    JSON.stringify({
+      run_id: 'run-1',
+      status: 'done',
+      summary: 'all good',
+      verdict: 'approved',
+      future_field: { supported: true },
+    }),
+  );
+
+  assert.equal(parsed.kind, 'success');
+  assert.equal(parsed.result.future_field.supported, true);
+});
+
 test('classifies every non-success review result without nested conditionals', () => {
   assert.equal(
     requestedChangesFeedback({
