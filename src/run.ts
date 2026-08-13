@@ -109,32 +109,27 @@ function defaultWorkers(herdr: RunHerdrSource): RunWorkerSource {
   };
 }
 
-/** Resolve the reporting sink, independent of every other collaborator. */
-function resolveReport(options: RunOptions): (message: string) => void {
-  return options.report ?? ((message: string) => console.log(message));
-}
-
-/** What `runForegroundLoop` needs to dispatch and process ready beads. */
-interface Dispatcher {
+/** Context shared by the foreground loop and human gates. */
+interface ForegroundContext {
   /** Runs one bead to a terminal `JobOutcome`, retaining state for recovery on failure. */
   readonly processBead: (bead: Bead) => Promise<JobOutcome>;
   readonly beads: RunBeadsSource;
-  /** The single sink shared by worker reports, human gates, and summary output. */
-  readonly report: (message: string) => void;
   readonly humanGate: HumanGateTracker;
+  /** Report the final summary through the context's single sink. */
+  readonly reportSummary: (message: string) => void;
 }
 
 /**
- * Build the dispatcher `runForegroundLoop` schedules ready beads against.
+ * Build the foreground context `runForegroundLoop` schedules ready beads against.
  *
  * Resolves every optional `RunOptions` collaborator to a concrete adapter
  * (constructing the production implementation for anything the caller did
  * not supply) and wires them into a single `processBead` function via
  * `createBeadJobProcessor`. Pass the raw `options` and already-resolved `cwd`
  * and `config` (both required first since several defaults, e.g. the merge
- * queue and beads adapter, are built from them). The dispatcher resolves the
+ * queue and beads adapter, are built from them). The context resolves the
  * report sink once, constructs the HumanGateTracker with that same sink, and
- * returns both as part of one object. No I/O beyond
+ * returns a context that owns all reporting. No I/O beyond
  * constructing in-memory adapter objects; the beads adapter is the only
  * default that touches the filesystem indirectly (via `createBeadsAdapter`'s
  * own lazy behavior). Throws `ConfigError` if `config.review` is enabled
@@ -148,12 +143,12 @@ interface Dispatcher {
  * `merge`), and the `createBeadJobProcessor` wiring back into
  * `runForegroundLoop`, its sole caller.
  */
-function createDispatcher(
+function createForegroundContext(
   options: RunOptions,
   cwd: string,
   config: GisConfig,
-): Dispatcher {
-  const report = resolveReport(options);
+): ForegroundContext {
+  const report = options.report ?? ((message: string) => console.log(message));
   const humanGate = new HumanGateTracker(report);
   const beads = options.beads ?? createBeadsAdapter({ cwd });
   const herdr = options.herdr ?? createHerdrAdapter();
@@ -209,7 +204,7 @@ function createDispatcher(
     },
   });
 
-  return { processBead, beads, report, humanGate };
+  return { processBead, beads, humanGate, reportSummary: report };
 }
 
 function resolveInitialMerged(options: RunOptions): number {
@@ -302,21 +297,18 @@ export async function runForegroundLoop(
   const config = options.config ?? (await loadConfig(cwd));
   requirePositiveInteger(config.concurrency, 'concurrency');
 
-  // Both option validations run before createDispatcher so that a caller
+  // Both option validations run before createForegroundContext so that a caller
   // passing several invalid options still sees the RangeError first, as it
   // did when createBeadJobProcessor (which can throw ConfigError) was wired
-  // up here rather than inside the dispatcher.
+  // up here rather than inside the context.
   const humanPollIntervalMs = resolveHumanPollIntervalMs(options);
   const counts: JobOutcomeCounts = {
     merged: resolveInitialMerged(options),
     blocked: 0,
   };
 
-  const { processBead, beads, report, humanGate } = createDispatcher(
-    options,
-    cwd,
-    config,
-  );
+  const { processBead, beads, reportSummary, humanGate } =
+    createForegroundContext(options, cwd, config);
 
   const active = new Map<string, Promise<JobOutcome>>();
 
@@ -347,7 +339,7 @@ export async function runForegroundLoop(
     humanWaiting: remainingHumanBeads.size,
   };
   const result = { ...summary, text: formatRunSummary(summary) };
-  report(result.text);
+  reportSummary(result.text);
   return result;
 }
 

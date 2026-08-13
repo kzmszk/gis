@@ -565,6 +565,7 @@ test('resolves one report sink and shares it with human-gate notifications', asy
   };
   Object.defineProperty(options, 'report', {
     get() {
+      // Return a different sink on every read to catch repeated resolution.
       const sink = sinks[reportReads] ?? sinks.at(-1);
       reportReads += 1;
       return (message) => sink.push(message);
