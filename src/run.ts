@@ -1,5 +1,5 @@
 import { createBeadsAdapter } from './beads.js';
-import type { Bead, BeadHandoffLocations } from './beads.js';
+import type { Bead } from './beads.js';
 import type { GisConfig } from './config.js';
 import { loadConfig } from './config.js';
 import { createHerdrAdapter } from './herdr.js';
@@ -114,14 +114,14 @@ function resolveReport(options: RunOptions): (message: string) => void {
   return options.report ?? ((message: string) => console.log(message));
 }
 
-/** Called when a worker itself raises a human gate, before its job is released. */
-type OnHumanGate = (gate: Bead, locations: BeadHandoffLocations) => void;
-
 /** What `runForegroundLoop` needs to dispatch and process ready beads. */
 interface Dispatcher {
   /** Runs one bead to a terminal `JobOutcome`, retaining state for recovery on failure. */
   readonly processBead: (bead: Bead) => Promise<JobOutcome>;
   readonly beads: RunBeadsSource;
+  /** The single sink shared by worker reports, human gates, and summary output. */
+  readonly report: (message: string) => void;
+  readonly humanGate: HumanGateTracker;
 }
 
 /**
@@ -130,17 +130,11 @@ interface Dispatcher {
  * Resolves every optional `RunOptions` collaborator to a concrete adapter
  * (constructing the production implementation for anything the caller did
  * not supply) and wires them into a single `processBead` function via
- * `createBeadJobProcessor`. Interface: pass the raw `options`, the
- * already-resolved `cwd` and `config` (both required first since several
- * defaults, e.g. the merge queue and the beads adapter, are built from
- * them), the already-resolved `report` sink, and `onHumanGate`, invoked
- * when a worker raises a human checkpoint mid-job. Both `report` and
- * `onHumanGate` are taken as parameters rather than resolved here because
- * the caller typically needs `report` before it can build `onHumanGate`
- * (e.g. to feed a `HumanGateTracker`); resolving `report` via
- * `resolveReport` is independent of every other collaborator, so the
- * caller can do that once, share the single result with both `humanGate`
- * and this function, and never create a resolution cycle. No I/O beyond
+ * `createBeadJobProcessor`. Pass the raw `options` and already-resolved `cwd`
+ * and `config` (both required first since several defaults, e.g. the merge
+ * queue and beads adapter, are built from them). The dispatcher resolves the
+ * report sink once, constructs the HumanGateTracker with that same sink, and
+ * returns both as part of one object. No I/O beyond
  * constructing in-memory adapter objects; the beads adapter is the only
  * default that touches the filesystem indirectly (via `createBeadsAdapter`'s
  * own lazy behavior). Throws `ConfigError` if `config.review` is enabled
@@ -158,9 +152,9 @@ function createDispatcher(
   options: RunOptions,
   cwd: string,
   config: GisConfig,
-  report: (message: string) => void,
-  onHumanGate: OnHumanGate,
 ): Dispatcher {
+  const report = resolveReport(options);
+  const humanGate = new HumanGateTracker(report);
   const beads = options.beads ?? createBeadsAdapter({ cwd });
   const herdr = options.herdr ?? createHerdrAdapter();
   const worktrees =
@@ -210,10 +204,12 @@ function createDispatcher(
     merge,
     resolveTranscript,
     report,
-    onHumanGate,
+    onHumanGate: (gate, locations) => {
+      humanGate.recordFromWorker(gate, locations.worktreePath);
+    },
   });
 
-  return { processBead, beads };
+  return { processBead, beads, report, humanGate };
 }
 
 function resolveInitialMerged(options: RunOptions): number {
@@ -316,16 +312,10 @@ export async function runForegroundLoop(
     blocked: 0,
   };
 
-  const report = resolveReport(options);
-  const humanGate = new HumanGateTracker(report);
-  const { processBead, beads } = createDispatcher(
+  const { processBead, beads, report, humanGate } = createDispatcher(
     options,
     cwd,
     config,
-    report,
-    (gate, locations) => {
-      humanGate.recordFromWorker(gate, locations.worktreePath);
-    },
   );
 
   const active = new Map<string, Promise<JobOutcome>>();
