@@ -1,5 +1,4 @@
 import { execFile } from 'node:child_process';
-import type { ExecFileException } from 'node:child_process';
 import { promisify } from 'node:util';
 import { join, resolve } from 'node:path';
 import type { Bead, BeadHandoffLocations } from './beads.js';
@@ -23,7 +22,23 @@ export interface GitAdapterOptions {
   readonly env?: NodeJS.ProcessEnv;
   readonly timeoutMs?: number;
   readonly maxBufferBytes?: number;
+  /** Override command execution for deterministic callers and tests. */
+  readonly runCommand?: GitCommandRunner;
 }
+
+interface GitCommandRunnerOptions {
+  readonly cwd: string | undefined;
+  readonly env: NodeJS.ProcessEnv | undefined;
+  readonly timeout: number | undefined;
+  readonly maxBuffer: number;
+  readonly encoding: 'utf8';
+}
+
+type GitCommandRunner = (
+  command: string,
+  args: readonly string[],
+  options: GitCommandRunnerOptions,
+) => Promise<{ readonly stdout: string }>;
 
 export class GitError extends Error {
   constructor(message: string) {
@@ -38,20 +53,25 @@ export class GitCommandError extends GitError {
   readonly signal: string | undefined;
   readonly stderr: string;
 
-  constructor(
-    args: readonly string[],
-    error: ExecFileException & { stderr?: string | Buffer },
-  ) {
-    const details = error.message || 'git command failed';
+  constructor(args: readonly string[], error: unknown) {
+    const record =
+      error !== null && typeof error === 'object'
+        ? (error as Record<string, unknown>)
+        : undefined;
+    const details =
+      error instanceof Error
+        ? error.message || 'git command failed'
+        : String(error) || 'git command failed';
     super(`git command failed (${args.join(' ')}): ${details}`);
     this.name = 'GitCommandError';
     this.args = [...args];
     this.code =
-      typeof error.code === 'string' || typeof error.code === 'number'
-        ? error.code
+      typeof record?.code === 'string' || typeof record?.code === 'number'
+        ? record.code
         : undefined;
-    this.signal = typeof error.signal === 'string' ? error.signal : undefined;
-    const stderr = (error as { stderr?: unknown }).stderr;
+    this.signal =
+      typeof record?.signal === 'string' ? record.signal : undefined;
+    const stderr = record?.stderr;
     this.stderr =
       typeof stderr === 'string'
         ? stderr
@@ -125,6 +145,7 @@ export class GitAdapter {
   private readonly env: NodeJS.ProcessEnv | undefined;
   private readonly timeoutMs: number | undefined;
   private readonly maxBufferBytes: number;
+  private readonly runCommand: GitCommandRunner;
 
   constructor(options?: GitAdapterOptions | string) {
     const normalized = normalizeOptions(options);
@@ -147,32 +168,33 @@ export class GitAdapter {
     this.env = normalized.env;
     this.timeoutMs = normalized.timeoutMs;
     this.maxBufferBytes = normalized.maxBufferBytes ?? 1024 * 1024;
+    this.runCommand =
+      normalized.runCommand ??
+      (async (command, args, options) =>
+        (await execFileAsync(command, [...args], options)) as {
+          stdout: string;
+        });
   }
 
   async listWorktrees(): Promise<GitWorktree[]> {
     const args = ['worktree', 'list', '--porcelain'];
     try {
-      const result = (await execFileAsync(this.command, args, {
+      const result = await this.runCommand(this.command, args, {
         cwd: this.cwd,
         env: this.env,
         timeout: this.timeoutMs,
         maxBuffer: this.maxBufferBytes,
         encoding: 'utf8',
-      })) as { stdout: string };
+      });
       return parseGitWorktreeList(result.stdout);
     } catch (error: unknown) {
       if (error instanceof GitProtocolError) {
         throw error;
       }
       if (error instanceof Error) {
-        throw new GitCommandError(
-          args,
-          error as ExecFileException & { stderr?: string | Buffer },
-        );
+        throw new GitCommandError(args, error);
       }
-      throw new GitError(
-        `git command failed (${args.join(' ')}): ${String(error)}`,
-      );
+      throw new GitCommandError(args, error);
     }
   }
 }
