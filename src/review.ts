@@ -155,10 +155,20 @@ function orderedCandidates(
   const same = candidates.filter(
     (candidate) => candidate.kind === implementationKind,
   );
-  // A review profile normally includes both configured vendors. If a project
-  // only configures the opposite vendor, retaining the implementation
-  // candidate still guarantees that review is attempted instead of skipped.
-  if (same.length === 0 && implementationCandidate !== undefined) {
+  // Prefer a different vendor, then configured same-vendor reviewers (which
+  // may name a stronger model), and finally the implementation model itself.
+  // Avoid retrying it when the review profile already contains that exact
+  // candidate.
+  if (
+    implementationCandidate !== undefined &&
+    implementationCandidate.kind === implementationKind &&
+    !same.some(
+      (candidate) =>
+        candidate.kind === implementationCandidate.kind &&
+        candidate.model === implementationCandidate.model &&
+        candidate.effort === implementationCandidate.effort,
+    )
+  ) {
     same.push(implementationCandidate);
   }
   return [...different, ...same];

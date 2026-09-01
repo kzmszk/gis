@@ -2,7 +2,7 @@ concurrency = 3
 base = "main"
 verify = "pnpm check"
 kinds = ["claude", "codex"]
-review = false
+review = true
 verify_max = 5
 review_max = 3
 blocked_timeout = "15m"
@@ -30,6 +30,10 @@ kind = "claude"
 model = "opus"
 effort = "xhigh"
 
+# Reviewer selection prefers a kind different from the implementation worker.
+# If unavailable, it tries the same-kind entries below, then the implementation
+# candidate itself. Codex Sol is the upper-model fallback for Codex Luna;
+# Claude Opus falls back to the same model because no higher Claude is configured.
 [[profiles.review]]
 kind = "claude"
 model = "opus"
