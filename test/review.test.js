@@ -445,6 +445,153 @@ test('falls back to same kind when the different reviewer cannot start', async (
   }
 });
 
+test('falls back to the implementation model after stronger reviewer candidates fail', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'gis-review-model-fallback-'));
+  const startedKinds = [];
+  let attempts = 0;
+  let snapshots = 0;
+  try {
+    const result = await startReviewer({
+      bead,
+      worktreePath: root,
+      runPath: join(root, '.gis', 'run'),
+      implementationPaneId: 'impl-pane',
+      workspaceId: 'workspace-1',
+      implementationKind: 'codex',
+      implementationCandidate: config().profiles.implement[0],
+      config: config(),
+      herdr: {
+        async paneSplit() {
+          return { type: 'pane_split', pane: { pane_id: 'review-pane' } };
+        },
+        async apiSnapshot() {
+          snapshots += 1;
+          return readySnapshot({
+            agent: 'codex',
+            state_change_seq: snapshots,
+          });
+        },
+        async agentStart(options) {
+          attempts += 1;
+          startedKinds.push(options.kind);
+          if (attempts < 3) {
+            throw new WorkerStartupError('start', new Error('capacity'));
+          }
+          return {
+            type: 'agent_started',
+            agent: { pane_id: options.paneId },
+            argv: [],
+          };
+        },
+        async agentPrompt() {
+          return { type: 'agent_prompted', agent: { pane_id: 'review-pane' } };
+        },
+      },
+    });
+
+    assert.equal(result.selection.candidate.kind, 'codex');
+    assert.equal(result.selection.candidate.model, 'impl');
+    assert.deepEqual(startedKinds, ['claude', 'codex', 'codex']);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('does not retry an implementation candidate already present in the review profile', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'gis-review-dedup-fallback-'));
+  const implementationCandidate = {
+    kind: 'claude',
+    model: 'opus',
+    effort: 'high',
+  };
+  const baseConfig = config();
+  const reviewConfig = config({
+    profiles: {
+      ...baseConfig.profiles,
+      implement: [implementationCandidate],
+      review: [
+        { kind: 'codex', model: 'review', effort: 'high' },
+        implementationCandidate,
+      ],
+    },
+  });
+  const startedKinds = [];
+  try {
+    await assert.rejects(
+      startReviewer({
+        bead,
+        worktreePath: root,
+        runPath: join(root, '.gis', 'run'),
+        implementationPaneId: 'impl-pane',
+        workspaceId: 'workspace-1',
+        implementationKind: 'claude',
+        implementationCandidate,
+        config: reviewConfig,
+        herdr: {
+          async paneSplit() {
+            return { type: 'pane_split', pane: { pane_id: 'review-pane' } };
+          },
+          async apiSnapshot() {
+            return readySnapshot();
+          },
+          async agentStart(options) {
+            startedKinds.push(options.kind);
+            throw new WorkerStartupError('start', new Error('capacity'));
+          },
+          async agentPrompt() {
+            return {
+              type: 'agent_prompted',
+              agent: { pane_id: 'review-pane' },
+            };
+          },
+        },
+      }),
+      WorkerStartupError,
+    );
+
+    assert.deepEqual(startedKinds, ['codex', 'claude']);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('rejects a mismatched implementation kind before splitting a reviewer pane', async () => {
+  let splitCalls = 0;
+  await assert.rejects(
+    startReviewer({
+      bead,
+      worktreePath: '/tmp/worktree',
+      runPath: '/tmp/worktree/.gis/run',
+      implementationPaneId: 'impl-pane',
+      workspaceId: 'workspace-1',
+      implementationKind: 'claude',
+      implementationCandidate: config().profiles.implement[0],
+      config: config(),
+      herdr: {
+        async paneSplit() {
+          splitCalls += 1;
+          return { type: 'pane_split', pane: { pane_id: 'review-pane' } };
+        },
+        async apiSnapshot() {
+          return readySnapshot();
+        },
+        async agentStart(options) {
+          return {
+            type: 'agent_started',
+            agent: { pane_id: options.paneId },
+            argv: [],
+          };
+        },
+        async agentPrompt() {
+          return { type: 'agent_prompted', agent: { pane_id: 'review-pane' } };
+        },
+      },
+    }),
+    /implementationCandidate\.kind \(codex\) must match implementationKind \(claude\)/,
+  );
+  assert.equal(splitCalls, 0);
+});
+
 test('falls back after a reviewer readiness failure as well as agent.start failure', async () => {
   const root = await mkdtemp(join(tmpdir(), 'gis-review-readiness-fallback-'));
   const startedKinds = [];
