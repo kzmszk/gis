@@ -161,7 +161,6 @@ function orderedCandidates(
   // candidate.
   if (
     implementationCandidate !== undefined &&
-    implementationCandidate.kind === implementationKind &&
     !same.some(
       (candidate) =>
         candidate.kind === implementationCandidate.kind &&
@@ -179,6 +178,14 @@ export async function startReviewer(
   options: ReviewerStartOptions,
 ): Promise<StartedReviewer> {
   requireNonEmpty(options.implementationKind, 'implementationKind');
+  if (
+    options.implementationCandidate !== undefined &&
+    options.implementationCandidate.kind !== options.implementationKind
+  ) {
+    throw new Error(
+      `implementationCandidate.kind (${options.implementationCandidate.kind}) must match implementationKind (${options.implementationKind})`,
+    );
+  }
   const paneId = await splitReviewerPane(options);
   const agentName = reviewAgentName(options.bead.id);
   const candidates = orderedCandidates(
