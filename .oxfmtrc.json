@@ -5,6 +5,7 @@
   "printWidth": 80,
   "sortPackageJson": false,
   "ignorePatterns": [
+    "**/*.html",
     ".agents/skills/",
     ".beads/",
     ".claude/",

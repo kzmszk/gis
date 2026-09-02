@@ -1,9 +1,0 @@
-[features]
-hooks = true
-
-# dolt が refs/heads/__dolt_remote_info__ に marker branch を force-push するのを
-# 止める。空でないと GitHub がそれを通常ブランチとして数え、「had recent pushes」
-# バナーが出続ける。.husky/pre-push と .claude/settings.json は同じことをしている。
-# gis-v3t / gis-7s2 参照。
-[shell_environment_policy.set]
-DOLT_REMOTE_INFO_BRANCH = ""
