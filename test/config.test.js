@@ -38,7 +38,7 @@ test('loads settings and preserves ordered profile candidates', () => {
 concurrency = 2
 base = "develop"
 verify = "npm run check"
-kinds = ["custom-agent"]
+kinds = ["custom-agent", "claude", "codex"]
 review = false
 verify_max = 4
 review_max = 2
@@ -61,7 +61,7 @@ effort = "max"
   assert.equal(config.concurrency, 2);
   assert.equal(config.base, 'develop');
   assert.equal(config.verify, 'npm run check');
-  assert.deepEqual(config.kinds, ['custom-agent']);
+  assert.deepEqual(config.kinds, ['custom-agent', 'claude', 'codex']);
   assert.equal(config.verify_max, 4);
   assert.equal(config.review_max, 2);
   assert.equal(config.blocked_timeout, '500ms');
@@ -99,6 +99,77 @@ test('rejects malformed TOML and invalid settings', () => {
       (error) => error instanceof ConfigError,
     );
   }
+});
+
+test('accepts only agy reasoning efforts supported by Antigravity CLI', () => {
+  const config = parseConfig(`
+kinds = ["agy"]
+[[profiles.plan]]
+kind = "agy"
+model = "gemini-3.7-flash-high"
+effort = "high"
+[[profiles.implement]]
+kind = "agy"
+model = "gemini-3.7-flash-high"
+effort = "high"
+[[profiles.review]]
+kind = "agy"
+model = "gemini-3.7-flash-high"
+effort = "high"
+`);
+  assert.deepEqual(config.profiles.implement[0], {
+    kind: 'agy',
+    model: 'gemini-3.7-flash-high',
+    effort: 'high',
+  });
+
+  for (const effort of ['xhigh', 'max']) {
+    assert.throws(
+      () =>
+        parseConfig(`
+kinds = ["agy", "claude", "codex"]
+[[profiles.implement]]
+kind = "agy"
+model = "gemini-3.7-flash-high"
+effort = "${effort}"
+`),
+      /effort must be low, medium, or high for agy/,
+    );
+  }
+});
+
+test('rejects profiles with no candidate from an enabled runner kind', () => {
+  assert.throws(
+    () =>
+      parseConfig(`
+kinds = ["agy"]
+[[profiles.implement]]
+kind = "agy"
+model = "gemini-3.7-flash-high"
+effort = "high"
+`),
+    /profiles\.plan must include at least one candidate whose kind is enabled by kinds/,
+  );
+});
+
+test('allows a review profile whose kinds are unavailable for cross-kind fallback', () => {
+  const config = parseConfig(`
+kinds = ["codex"]
+[[profiles.plan]]
+kind = "codex"
+model = "plan"
+effort = "high"
+[[profiles.implement]]
+kind = "codex"
+model = "implement"
+effort = "high"
+[[profiles.review]]
+kind = "claude"
+model = "review"
+effort = "high"
+`);
+
+  assert.equal(config.profiles.review[0].kind, 'claude');
 });
 
 test('loads review mode without the old not-implemented warning', async () => {

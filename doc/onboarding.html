@@ -1,0 +1,1158 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>gis (Ghost In the Shell) — 新人向けオンボーディングガイド</title>
+  <!-- Mermaid.js for rich diagram rendering -->
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <script>
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: 'neutral',
+      securityLevel: 'loose',
+      fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif'
+    });
+  </script>
+  <style>
+    :root {
+      --primary: #2563eb;
+      --primary-dark: #1d4ed8;
+      --primary-light: #eff6ff;
+      --secondary: #475569;
+      --accent: #0d9488;
+      --accent-light: #f0fdfa;
+      --warning: #d97706;
+      --warning-light: #fffbeb;
+      --danger: #dc2626;
+      --danger-light: #fef2f2;
+      --success: #16a34a;
+      --success-light: #f0fdf4;
+      --bg: #f8fafc;
+      --card-bg: #ffffff;
+      --text: #0f172a;
+      --text-muted: #64748b;
+      --border: #e2e8f0;
+      --code-bg: #1e293b;
+      --sidebar-width: 280px;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Hiragino Sans", "Hiragino Kaku Gothic ProN", Meiryo, sans-serif;
+      color: var(--text);
+      background-color: var(--bg);
+      line-height: 1.7;
+      display: flex;
+    }
+
+    /* Sidebar Navigation */
+    #sidebar {
+      width: var(--sidebar-width);
+      height: 100vh;
+      position: sticky;
+      top: 0;
+      background-color: #0f172a;
+      color: #cbd5e1;
+      overflow-y: auto;
+      padding: 24px 16px;
+      flex-shrink: 0;
+      border-right: 1px solid #1e293b;
+    }
+
+    .sidebar-header {
+      padding-bottom: 20px;
+      border-bottom: 1px solid #334155;
+      margin-bottom: 20px;
+    }
+
+    .sidebar-header h1 {
+      font-size: 1.25rem;
+      color: #f8fafc;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .sidebar-header .tag {
+      font-size: 0.75rem;
+      background: var(--primary);
+      color: white;
+      padding: 2px 8px;
+      border-radius: 9999px;
+      font-weight: normal;
+    }
+
+    .sidebar-header p {
+      font-size: 0.8rem;
+      color: #94a3b8;
+      margin-top: 6px;
+    }
+
+    .nav-list {
+      list-style: none;
+    }
+
+    .nav-item {
+      margin-bottom: 6px;
+    }
+
+    .nav-link {
+      display: block;
+      color: #94a3b8;
+      text-decoration: none;
+      font-size: 0.875rem;
+      padding: 8px 12px;
+      border-radius: 6px;
+      transition: all 0.2s;
+    }
+
+    .nav-link:hover, .nav-link.active {
+      color: #ffffff;
+      background-color: #1e293b;
+    }
+
+    .nav-link.active {
+      border-left: 3px solid var(--primary);
+      background-color: #1e293b;
+      font-weight: 600;
+    }
+
+    .nav-sublist {
+      list-style: none;
+      padding-left: 16px;
+      margin-top: 4px;
+    }
+
+    .nav-sublink {
+      display: block;
+      color: #64748b;
+      text-decoration: none;
+      font-size: 0.8rem;
+      padding: 4px 8px;
+      border-radius: 4px;
+      transition: color 0.2s;
+    }
+
+    .nav-sublink:hover {
+      color: #cbd5e1;
+    }
+
+    /* Main Content */
+    #main-content {
+      flex: 1;
+      padding: 40px 56px;
+      max-width: 1200px;
+      overflow-x: hidden;
+    }
+
+    /* Hero Banner */
+    .hero {
+      background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+      color: white;
+      padding: 40px;
+      border-radius: 16px;
+      margin-bottom: 40px;
+      box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.1);
+      position: relative;
+      overflow: hidden;
+    }
+
+    .hero::after {
+      content: "gis";
+      position: absolute;
+      right: 20px;
+      bottom: -20px;
+      font-size: 8rem;
+      font-weight: 900;
+      color: rgba(255, 255, 255, 0.03);
+      pointer-events: none;
+      line-height: 1;
+    }
+
+    .hero h1 {
+      font-size: 2.25rem;
+      font-weight: 800;
+      letter-spacing: -0.025em;
+      margin-bottom: 12px;
+    }
+
+    .hero p {
+      font-size: 1.125rem;
+      color: #94a3b8;
+      max-width: 800px;
+      line-height: 1.6;
+    }
+
+    .hero-badges {
+      display: flex;
+      gap: 12px;
+      margin-top: 20px;
+      flex-wrap: wrap;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 12px;
+      border-radius: 9999px;
+      font-size: 0.8125rem;
+      font-weight: 600;
+    }
+
+    .badge-blue { background: rgba(37, 99, 235, 0.2); color: #93c5fd; border: 1px solid rgba(59, 130, 246, 0.3); }
+    .badge-teal { background: rgba(13, 148, 136, 0.2); color: #5eead4; border: 1px solid rgba(20, 184, 166, 0.3); }
+    .badge-amber { background: rgba(217, 119, 6, 0.2); color: #fcd34d; border: 1px solid rgba(245, 158, 11, 0.3); }
+
+    /* Sections & Cards */
+    section {
+      margin-bottom: 56px;
+      scroll-margin-top: 24px;
+    }
+
+    h2 {
+      font-size: 1.625rem;
+      font-weight: 700;
+      color: #0f172a;
+      margin-bottom: 20px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding-bottom: 10px;
+      border-bottom: 2px solid var(--border);
+    }
+
+    h2 .section-num {
+      background: var(--primary);
+      color: white;
+      font-size: 0.875rem;
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 700;
+    }
+
+    h3 {
+      font-size: 1.25rem;
+      font-weight: 600;
+      color: #1e293b;
+      margin: 28px 0 14px 0;
+    }
+
+    h4 {
+      font-size: 1rem;
+      font-weight: 600;
+      color: #334155;
+      margin: 16px 0 8px 0;
+    }
+
+    p {
+      margin-bottom: 16px;
+      color: #334155;
+    }
+
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 24px;
+      margin-bottom: 24px;
+      box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.05);
+    }
+
+    .grid-2 {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 20px;
+      margin-bottom: 24px;
+    }
+
+    .grid-3 {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+
+    .feature-card {
+      background: white;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 20px;
+      transition: transform 0.2s, box-shadow 0.2s;
+    }
+
+    .feature-card:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+    }
+
+    .feature-card .icon {
+      font-size: 1.5rem;
+      margin-bottom: 12px;
+    }
+
+    .feature-card h4 {
+      margin: 0 0 8px 0;
+      color: var(--text);
+    }
+
+    /* Diagrams */
+    .diagram-container {
+      background: white;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 24px;
+      margin: 20px 0;
+      text-align: center;
+      overflow-x: auto;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+    }
+
+    .diagram-caption {
+      font-size: 0.8125rem;
+      color: var(--text-muted);
+      margin-top: 12px;
+      font-weight: 500;
+    }
+
+    /* Callouts */
+    .callout {
+      border-left: 4px solid;
+      padding: 16px 20px;
+      border-radius: 0 8px 8px 0;
+      margin: 20px 0;
+      font-size: 0.9375rem;
+    }
+
+    .callout-info {
+      background-color: var(--primary-light);
+      border-color: var(--primary);
+      color: #1e40af;
+    }
+
+    .callout-warning {
+      background-color: var(--warning-light);
+      border-color: var(--warning);
+      color: #92400e;
+    }
+
+    .callout-danger {
+      background-color: var(--danger-light);
+      border-color: var(--danger);
+      color: #991b1b;
+    }
+
+    .callout-success {
+      background-color: var(--success-light);
+      border-color: var(--success);
+      color: #166534;
+    }
+
+    .callout-title {
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-bottom: 6px;
+    }
+
+    /* Tables */
+    .table-wrapper {
+      overflow-x: auto;
+      margin: 20px 0;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: white;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      text-align: left;
+      font-size: 0.875rem;
+    }
+
+    th {
+      background-color: #f1f5f9;
+      color: #334155;
+      font-weight: 600;
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    td {
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border);
+      color: #475569;
+    }
+
+    tr:last-child td {
+      border-bottom: none;
+    }
+
+    tr:hover td {
+      background-color: #f8fafc;
+    }
+
+    /* Code Blocks */
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 0.85em;
+      background: #e2e8f0;
+      color: #0f172a;
+      padding: 2px 6px;
+      border-radius: 4px;
+    }
+
+    pre {
+      background: var(--code-bg);
+      color: #f8fafc;
+      padding: 16px 20px;
+      border-radius: 8px;
+      overflow-x: auto;
+      margin: 16px 0;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 0.875rem;
+      line-height: 1.5;
+    }
+
+    pre code {
+      background: transparent;
+      color: inherit;
+      padding: 0;
+    }
+
+    .code-filename {
+      background: #334155;
+      color: #cbd5e1;
+      font-size: 0.75rem;
+      font-family: ui-monospace, SFMono-Regular, monospace;
+      padding: 4px 12px;
+      border-radius: 8px 8px 0 0;
+      display: inline-block;
+      margin-bottom: -16px;
+      margin-top: 16px;
+    }
+
+    /* Step Timeline */
+    .steps-container {
+      position: relative;
+      padding-left: 32px;
+      margin: 24px 0;
+    }
+
+    .steps-container::before {
+      content: '';
+      position: absolute;
+      left: 11px;
+      top: 8px;
+      bottom: 8px;
+      width: 2px;
+      background: var(--border);
+    }
+
+    .step-item {
+      position: relative;
+      margin-bottom: 28px;
+    }
+
+    .step-item:last-child {
+      margin-bottom: 0;
+    }
+
+    .step-bullet {
+      position: absolute;
+      left: -32px;
+      top: 0;
+      width: 24px;
+      height: 24px;
+      border-radius: 50%;
+      background: white;
+      border: 2px solid var(--primary);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.75rem;
+      font-weight: 700;
+      color: var(--primary);
+    }
+
+    .step-item.success .step-bullet {
+      border-color: var(--success);
+      color: var(--success);
+    }
+
+    .step-item.danger .step-bullet {
+      border-color: var(--danger);
+      color: var(--danger);
+    }
+
+    .step-title {
+      font-weight: 700;
+      color: #0f172a;
+      margin-bottom: 4px;
+      font-size: 1rem;
+    }
+
+    .step-desc {
+      color: #64748b;
+      font-size: 0.875rem;
+    }
+
+    /* Footer */
+    footer {
+      margin-top: 64px;
+      padding-top: 24px;
+      border-top: 1px solid var(--border);
+      text-align: center;
+      color: var(--text-muted);
+      font-size: 0.875rem;
+    }
+
+    @media (max-width: 900px) {
+      body { flex-direction: column; }
+      #sidebar { width: 100%; height: auto; position: static; }
+      #main-content { padding: 24px 16px; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Sidebar Navigation -->
+  <nav id="sidebar">
+    <div class="sidebar-header">
+      <h1>gis <span class="tag">v0.1.0</span></h1>
+      <p>Ghost In the Shell — Agent Orchestrator</p>
+    </div>
+    <ul class="nav-list">
+      <li class="nav-item"><a href="#intro" class="nav-link active">1. gis とは？</a></li>
+      <li class="nav-item"><a href="#philosophy" class="nav-link">2. 設計思想 & 核の3要素</a></li>
+      <li class="nav-item"><a href="#architecture" class="nav-link">3. システム全体構造</a></li>
+      <li class="nav-item"><a href="#lifecycle" class="nav-link">4. タスク（Bead）の生涯</a></li>
+      <li class="nav-item"><a href="#deep-dive" class="nav-link">5. 深掘り: 堅牢性の仕組み</a>
+        <ul class="nav-sublist">
+          <li><a href="#human-gate" class="nav-sublink">・Human Checkpoint Gate</a></li>
+          <li><a href="#crash-recovery" class="nav-sublink">・3者照合クラッシュ復旧</a></li>
+          <li><a href="#slop-gate" class="nav-sublink">・コード品質ゲート (Slop)</a></li>
+        </ul>
+      </li>
+      <li class="nav-item"><a href="#codebase-map" class="nav-link">6. ソースコード探訪 (src/)</a></li>
+      <li class="nav-item"><a href="#quickstart" class="nav-link">7. 新人向け実践ワークフロー</a></li>
+      <li class="nav-item"><a href="#conventions" class="nav-link">8. 開発規約・品質基準</a></li>
+    </ul>
+  </nav>
+
+  <!-- Main Content Area -->
+  <main id="main-content">
+
+    <!-- Hero Header -->
+    <div class="hero">
+      <h1>gis (Ghost In the Shell)</h1>
+      <p>
+        <strong>Gas Town を徹底的に削ぎ落とした、決定論的マルチAIエージェント・オーケストレーション環境。</strong><br>
+        beads で管理された課題を git worktree で分離されたエージェント（Claude Code / Codex CLI）に並列で配り、機械検証と相互レビューを通過したものだけを直列にマージします。
+      </p>
+      <div class="hero-badges">
+        <span class="badge badge-blue">⚡ Deterministic Dispatch</span>
+        <span class="badge badge-teal">🛡️ Git Worktree Isolation</span>
+        <span class="badge badge-amber">🔒 Serial Rebase Merge Queue</span>
+      </div>
+    </div>
+
+    <!-- 1. What is gis? -->
+    <section id="intro">
+      <h2><span class="section-num">1</span> gis とは？（全体概要）</h2>
+      <p>
+        AIコーディングエージェント（Claude Code や Codex CLI）の自律的な開発能力を活用しつつ、
+        <strong>「コンフリクトでコードが壊れる」「エージェントが無限ループする」「勝手に危険な変更をマージする」</strong>といった並列開発特有の破綻を、
+        <strong>決定論的なルールとサンドボックス構造</strong>で完全に防ぐためのオーケストレーションツールです。
+      </p>
+
+      <div class="grid-3">
+        <div class="feature-card">
+          <div class="icon">🏷️</div>
+          <h4>Beads による課題管理</h4>
+          <p>DoltベースのGit互換チケットシステム <code>bd</code> を使用。依存関係グラフと優先度から「今着手すべき作業」が決まります。</p>
+        </div>
+        <div class="feature-card">
+          <div class="icon">🌿</div>
+          <h4>Worktree による完全分離</h4>
+          <p>1つのチケット（Bead）ごとに専用の <code>git worktree</code> を作成。エージェント同士が同じディレクトリで衝突することはありません。</p>
+        </div>
+        <div class="feature-card">
+          <div class="icon">🚦</div>
+          <h4>直列マージキュー</h4>
+          <p>実装完了したブランチは1本ずつ順番に <code>main</code> を rebase し、再度テストを実行して合格したものだけをマージします。</p>
+        </div>
+      </div>
+
+      <div class="diagram-container">
+        <div class="mermaid">
+graph LR
+    subgraph Tickets ["beads (Dolt DB)"]
+        B1["Bead 1 (Ready)"]
+        B2["Bead 2 (Ready)"]
+        B3["Bead 3 (Blocked)"]
+    end
+
+    subgraph gis ["gis Orchestrator Loop"]
+        Dispatch["Deterministic Dispatch<br>(Priority & Deps)"]
+    end
+
+    subgraph Workers ["Parallel Worktrees (Herdr Panes)"]
+        W1["Worktree 1<br>Claude Code<br>[Implement & Verify]"]
+        W2["Worktree 2<br>Codex CLI<br>[Implement & Verify]"]
+    end
+
+    subgraph MergeQueue ["Serial Merge Queue"]
+        MQ["1. Rebase on main<br>2. Run verify (pnpm check)<br>3. Fast-forward merge"]
+    end
+
+    subgraph MainBranch ["main Branch"]
+        Main["Clean & Tested Codebase"]
+    end
+
+    Tickets --> Dispatch
+    Dispatch --> W1
+    Dispatch --> W2
+    W1 --> MQ
+    W2 --> MQ
+    MQ --> Main
+        </div>
+        <div class="diagram-caption">図 1-1: gis の基本コンセプト — Beadsから並列Workerへ、最後は直列で安全に合流</div>
+      </div>
+    </section>
+
+    <!-- 2. Philosophy & Core Pillars -->
+    <section id="philosophy">
+      <h2><span class="section-num">2</span> 設計思想 & 核の3要素</h2>
+      <p>
+        gis の最大の特徴は<strong>「複雑さを意図的に捨てる」</strong>哲学にあります。先行する大規模エージェントフレームワーク（Gas Townなど）が抱えていた過度な抽象化や運用の難しさを排し、実用上本当に必要な3つだけに機能を絞り込みました。
+      </p>
+
+      <div class="card">
+        <h3>🎯 gis が担う「3つの核」</h3>
+        <ol style="margin-left: 20px; line-height: 2;">
+          <li><strong>ワークツリー分離した並列ワーカー</strong>: 各AIエージェントに独立した作業場を与える</li>
+          <li><strong>beads からの決定的な work dispatch</strong>: LLMにタスク配分を任せず、決定論的ロジックで配る</li>
+          <li><strong>マージ順序の直列化</strong>: 複数ブランチの同時合流による破損をゼロにする</li>
+        </ol>
+      </div>
+
+      <h3>Gas Town から意図的に捨てたもの</h3>
+      <p>なぜ捨てたのかの理由を知ることで、gis のコードベースがなぜここまで簡潔に保たれているかが分かります。</p>
+
+      <div class="table-wrapper">
+        <table>
+          <thead>
+            <tr>
+              <th>捨てたもの</th>
+              <th>理由・gis での代替手段</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>常駐監視エージェント</strong> (Deacon/Witness等)</td>
+              <td>「エージェントの不調をエージェントで直す」はデバッグ不能。プロセス状態検知は <code>herdr</code> のポーリングで十分。</td>
+            </tr>
+            <tr>
+              <td><strong>常駐デーモン</strong></td>
+              <td>「デーモンが死んだ」「二重起動」「ログ迷子」等の運用問題を生む。<code>gis run</code> をフォアグラウンドループとして動かす。</td>
+            </tr>
+            <tr>
+              <td><strong>エージェント間通信</strong> (mail/broadcast)</td>
+              <td>直列パイプライン（実装 → 検証 → レビュー → マージ）で十分代替できる。</td>
+            </tr>
+            <tr>
+              <td><strong>独自語彙</strong> (rig/refinery/polecat)</td>
+              <td>認知負荷の温床。一般名詞（worktree, worker, reviewer, merge queue, gate）のみを使う。</td>
+            </tr>
+            <tr>
+              <td><strong>複数リポジトリ横断</strong></td>
+              <td>複雑さの元凶。単一リポジトリ前提とし、別ディレクトリで起動すれば90%足りる。</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="diagram-container">
+        <div class="mermaid">
+flowchart TD
+    subgraph Truths ["真実の源 (Source of Truth) は2つだけ"]
+        T1["何をすべきか<br><b>beads (Dolt DB)</b>"]
+        T2["今何が動いているか<br><b>herdr live snapshot</b>"]
+    end
+
+    subgraph Volatile ["揮発的状態 (PID / Pane ID / 現在フェーズ)"]
+        V1["<b>どこにも永続化しない！</b><br>永続化すると整合性回復コードが無限に生えるため、<br>再起動時はその場の snapshot と照合するだけ。"]
+    end
+
+    Truths -.-> Volatile
+        </div>
+        <div class="diagram-caption">図 2-1: 状態管理の原則 — 揮発的状態を永続化しない</div>
+      </div>
+    </section>
+
+    <!-- 3. Architecture Overview -->
+    <section id="architecture">
+      <h2><span class="section-num">3</span> システム全体構造</h2>
+      <p>
+        gis はスタンドアロンのデーモンではなく、<strong>herdr</strong>（ターミナルマルチプレクサ）のソケットAPIを叩きながら、ローカルファイルとコマンド（<code>git</code>, <code>bd</code>）を協調させる TypeScript プログラムです。
+      </p>
+
+      <div class="diagram-container">
+        <div class="mermaid">
+graph TB
+    subgraph UserSpace ["開発者 / ターミナル"]
+        User["開発者 (Human)"]
+        CLI["gis run / gis init"]
+    end
+
+    subgraph Orchestrator ["gis Orchestrator (TypeScript / Node.js)"]
+        RunLoop["Run Loop (src/run.ts)"]
+        BeadsAdapt["Beads Adapter (src/beads.ts)"]
+        HerdrAdapt["Herdr Client (src/herdr.ts)"]
+        WorktreeMgr["Worktree Mgr (src/worktree.ts)"]
+        MergeMgr["Merge Queue (src/merge.ts)"]
+        SlopGate["Slop Quality Gate (src/slop.ts)"]
+    end
+
+    subgraph ExternalTools ["外部ツール群"]
+        HerdrSocket["herdr Socket API<br>(PTY / Pane / Agent Lifecycle)"]
+        BeadsDB["beads / Dolt<br>(Issue Tracker)"]
+        GitRepo["Git Repository<br>(Worktrees & Branches)"]
+    end
+
+    subgraph ExecutionLayer ["実行層 (Herdr Panes)"]
+        Pane1["Pane 1: Worker<br>(Claude Code / Codex)"]
+        Pane2["Pane 2: Reviewer<br>(Codex / Claude)"]
+    end
+
+    User --> CLI
+    CLI --> RunLoop
+    RunLoop --> BeadsAdapt --> BeadsDB
+    RunLoop --> HerdrAdapt --> HerdrSocket
+    RunLoop --> WorktreeMgr --> GitRepo
+    RunLoop --> MergeMgr --> GitRepo
+    RunLoop --> SlopGate
+
+    HerdrSocket --> Pane1
+    HerdrSocket --> Pane2
+        </div>
+        <div class="diagram-caption">図 3-1: gis のシステム構成と外部コンポーネント連携</div>
+      </div>
+
+      <div class="callout callout-info">
+        <div class="callout-title">💡 なぜエージェントの stdout を読まないのか？</div>
+        エージェントは PTY（仮想端末）上で対話モードで動作します。gis は画面の文字出力をスクレイピングするのではなく、
+        <strong>ファイルシステム経由（<code>.gis/run/implement-prompt.md</code> や <code>.gis/run/round-1-impl.json</code>）のみで通信</strong>します。
+        これにより、UIの微小な変更で壊れる「画面読みパース」を根本的に排除しています。
+      </div>
+    </section>
+
+    <!-- 4. Bead Lifecycle -->
+    <section id="lifecycle">
+      <h2><span class="section-num">4</span> タスク（Bead）の生涯（ライフサイクル）</h2>
+      <p>
+        1つの課題（Bead）がディスパッチされてからマージされるまでの完全なステップです。
+      </p>
+
+      <div class="diagram-container">
+        <div class="mermaid">
+sequenceDiagram
+    autonumber
+    actor gis as gis (Orchestrator)
+    participant bd as beads (Dolt)
+    participant herdr as herdr API
+    participant git as Git Worktree
+    participant worker as Worker (Implement)
+    participant reviewer as Reviewer (Agent)
+
+    Note over gis,bd: 1. Dispatch
+    gis->>bd: bd ready (優先度・依存チェック)
+    bd-->>gis: Bead 取得
+    gis->>bd: bd update --status in_progress
+
+    Note over gis,git: 2. Workspace Setup
+    gis->>git: git worktree add
+    gis->>git: implement-prompt.md 作成
+
+    Note over gis,worker: 3. Implementation
+    gis->>herdr: agent start (Claude / Codex)
+    gis->>herdr: agent prompt (implement-prompt.md)
+    herdr->>worker: PTY内でプロンプト実行
+    worker-->>herdr: 状態変更 (working から done)
+    herdr-->>gis: wait 完了検知
+
+    Note over gis,git: 4. Verify Loop
+    loop 最大 verify_max 回
+        gis->>git: verify コマンド実行 (pnpm check)
+        alt 検証失敗
+            gis->>herdr: 指摘内容を同一ペインに再プロンプト
+            worker-->>herdr: 修正作業 (done)
+        else 検証合格
+            Note over gis: Verify 完了
+        end
+    end
+
+    Note over gis,reviewer: 5. Review Loop
+    opt review 設定が有効な場合
+        gis->>herdr: レビュアー起動 (異ベンダ優先)
+        loop 最大 review_max 回
+            gis->>herdr: review-prompt 投入
+            reviewer-->>herdr: 判定 (approved / rejected)
+            alt 指摘あり
+                gis->>herdr: 実装ワーカーに修正指示
+                worker-->>herdr: 修正
+                gis->>git: verify 実行
+            else 承認
+                Note over gis: Review 完了
+            end
+        end
+    end
+
+    Note over gis,git: 6. Serial Merge
+    gis->>git: main に rebase
+    gis->>git: verify 再実行
+    gis->>git: fast-forward merge
+    gis->>bd: bd close
+    gis->>git: worktree & branch 削除
+        </div>
+        <div class="diagram-caption">図 4-1: Bead 1件のライフサイクル・シーケンス</div>
+      </div>
+
+      <div class="steps-container">
+        <div class="step-item">
+          <div class="step-bullet">1</div>
+          <div class="step-title">ディスパッチ & プロファイル解決</div>
+          <div class="step-desc">
+            <code>bd ready --exclude-label human</code> から最優先のタスクを決定論的に取得。タスク種別（epic/decisionなら <code>plan</code>、通常は <code>implement</code>）から適切なAIモデル（Claude / Codex）を選択。
+          </div>
+        </div>
+
+        <div class="step-item">
+          <div class="step-bullet">2</div>
+          <div class="step-title">ワークツリー作成 & エージェント起動</div>
+          <div class="step-desc">
+            <code>.worktrees/{bead-id}</code> に独立したブランチを展開。<code>.gis/run/implement-prompt.md</code> に要件を書き込み、herdr 経由でエージェントを立ち上げます。
+          </div>
+        </div>
+
+        <div class="step-item">
+          <div class="step-bullet">3</div>
+          <div class="step-title">Verify ループ（安価な機械検証を先行）</div>
+          <div class="step-desc">
+            高価なAIレビューの前に、<code>pnpm check</code>（型チェック、lint、単体テスト、slop検査）を実行。失敗時は<b>同一ペイン（文脈保持のまま）</b>にエラーログを投げて修正させます。
+          </div>
+        </div>
+
+        <div class="step-item">
+          <div class="step-bullet">4</div>
+          <div class="step-title">Review ループ（異ベンダ相互レビュー）</div>
+          <div class="step-desc">
+            Claudeが書いたコードはCodexが、Codexが書いたコードはClaudeがレビュー。<b>同一レビュアーが最後まで見守る</b>ため、指摘が発散せず確実に収束します。
+          </div>
+        </div>
+
+        <div class="step-item success">
+          <div class="step-bullet">5</div>
+          <div class="step-title">直列マージキュー</div>
+          <div class="step-desc">
+            1ブランチずつ順番に <code>main</code> を rebase → コミット差分が存在するか確認 → verify 再実行 → 合格なら merge & <code>bd close</code>。
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 5. Deep Dive Mechanisms -->
+    <section id="deep-dive">
+      <h2><span class="section-num">5</span> 深掘り: 堅牢性を支える仕組み</h2>
+
+      <!-- 5.1 Human Gate -->
+      <div id="human-gate" class="card">
+        <h3>🛡️ 5.1 人間確認ゲート (Human Checkpoint Gate)</h3>
+        <p>
+          エージェントに「重要な判断の手前で止まれ」とプロンプトで指示しても、無視して進んでしまうリスクがあります。gis ではこれを<b>Beads の依存関係グラフ</b>で構造的に強制します。
+        </p>
+
+        <div class="diagram-container">
+          <div class="mermaid">
+graph TD
+    subgraph Before ["エージェントが判断を求めた時"]
+        TaskA["実装タスク A<br>(needs_human 返却)"]
+        TaskNext["後続タスク B, C"]
+        TaskA -->|依存| TaskNext
+    end
+
+    subgraph After ["gis が依存グラフを安全に書き換え"]
+        BlockedA["タスク A<br>(blocked に移行 / worktree保持)"]
+        Gate["Human Gate (label: human)<br>設計判断の確認"]
+        TaskNext2["後続タスク B, C<br>(待機状態)"]
+
+        Gate -->|依存| TaskNext2
+        BlockedA -.->|引き継ぎ| Gate
+    end
+          </div>
+          <div class="diagram-caption">図 5-1: Human Gate による構造的停止メカニズム</div>
+        </div>
+
+        <div class="callout callout-warning">
+          <div class="callout-title">⚠️ なぜエージェントに直接 bd を触らせないのか？</div>
+          エージェントに <code>bd</code> を操作させると、自分でゲートを作ったり、自分自身のステータスを書き換えてゲートを回避できてしまいます。そのため <b><code>bd</code> への書き込みは gis のみが独占</b>します。
+        </div>
+      </div>
+
+      <!-- 5.2 Crash Recovery -->
+      <div id="crash-recovery" class="card">
+        <h3>🔄 5.2 3者照合によるクラッシュ復旧</h3>
+        <p>
+          <code>gis run</code> を実行中に Ctrl-C で中断したり、OSが強制終了された場合でも、次回起動時に「3者照合」を一回行うだけで完全に回復します。
+        </p>
+
+        <div class="table-wrapper">
+          <table>
+            <thead>
+              <tr>
+                <th>Herdr Pane</th>
+                <th>Git Worktree</th>
+                <th>Beads Status</th>
+                <th>復旧アクション</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>❌ なし</td>
+                <td>❌ なし</td>
+                <td>🟡 in_progress</td>
+                <td><strong>open に戻す</strong>（次回ディスパッチで再実行）</td>
+              </tr>
+              <tr>
+                <td>❌ なし</td>
+                <td>🌿 あり</td>
+                <td>🟡 in_progress</td>
+                <td><strong>blocked に倒す</strong>（worktreeパスを記録し人間へ引き継ぎ）</td>
+              </tr>
+              <tr>
+                <td>🖥️ あり</td>
+                <td>-</td>
+                <td>❌ なし / closed</td>
+                <td><strong>人間に報告して放置</strong>（勝手に消さない）</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- 5.3 Slop Gate -->
+      <div id="slop-gate" class="card">
+        <h3>🧹 5.3 コード品質ゲート (gis slop)</h3>
+        <p>
+          AIエージェントが生成しがちな「コードの重複（Redundancy）」や「無駄な構造肥大（Structural Erosion）」を merge-base と比較して静的解析します。
+        </p>
+        <ul style="margin-left: 20px; color: #475569;">
+          <li><strong>Redundancy:</strong> 正規化された3行ブロックの重複コード比率</li>
+          <li><strong>Structural Erosion:</strong> 複雑度10超の関数が占める割合（<code>cyclomatic complexity * sqrt(SLOC)</code>）</li>
+        </ul>
+        <p style="margin-top: 10px;">
+          <code>gis slop</code> では、これらの指標が <strong>0.02 (2%)</strong> を超えて悪化した場合にゲートが遮断されます。
+        </p>
+      </div>
+    </section>
+
+    <!-- 6. Codebase Map -->
+    <section id="codebase-map">
+      <h2><span class="section-num">6</span> ソースコード探訪 (src/ ディレクトリ)</h2>
+      <p>
+        主要なTypeScriptモジュールとそれぞれの責任範囲です。すべてのロジックが疎結合に保たれています。
+      </p>
+
+      <div class="grid-2">
+        <div class="feature-card">
+          <h4>🚀 実行 & オーケストレーション</h4>
+          <ul style="font-size: 0.875rem; list-style: none;">
+            <li><code>cli.ts</code>: CLI エントリーポイント (<code>gis run</code>, <code>init</code>, <code>slop</code>)</li>
+            <li><code>run.ts</code>: メインループ、並列度制御、サマリ出力</li>
+            <li><code>run-worker.ts</code>: Bead 1件の全体パイプライン調整</li>
+            <li><code>init.ts</code>: <code>gis init</code> ウィザード</li>
+          </ul>
+        </div>
+
+        <div class="feature-card">
+          <h4>🔌 外部システム連携</h4>
+          <ul style="font-size: 0.875rem; list-style: none;">
+            <li><code>beads.ts</code>: <code>bd</code> CLI ラッパー (Dolt連携、依存関係)</li>
+            <li><code>herdr.ts</code>: Herdr ソケット API クライアント (ペイン管理)</li>
+            <li><code>worktree.ts</code>: Git worktree の作成・削除</li>
+            <li><code>transcripts.ts</code>: Claude / Codex のログ索引化</li>
+          </ul>
+        </div>
+
+        <div class="feature-card">
+          <h4>⚙️ 検証・レビュー・品質</h4>
+          <ul style="font-size: 0.875rem; list-style: none;">
+            <li><code>verify.ts</code>: 検証コマンド実行 & エラーフィードバック</li>
+            <li><code>review.ts</code> / <code>review-loop.ts</code>: 相互レビュー管理</li>
+            <li><code>merge.ts</code>: 直列マージキュー & Rebase</li>
+            <li><code>slop.ts</code>: コード品質・重複度・複雑度計測</li>
+          </ul>
+        </div>
+
+        <div class="feature-card">
+          <h4>🛡️ 復旧 & エスカレーション</h4>
+          <ul style="font-size: 0.875rem; list-style: none;">
+            <li><code>recovery.ts</code>: 3者照合クラッシュリカバリ</li>
+            <li><code>blocked.ts</code>: blocked 移行 & 3点セット記録</li>
+            <li><code>run-human-gate.ts</code>: Human Checkpoint 依存解決</li>
+            <li><code>profiles.ts</code>: モデルプロファイル & フォールバック</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <!-- 7. Practical Quickstart -->
+    <section id="quickstart">
+      <h2><span class="section-num">7</span> 新人向け実践ワークフロー</h2>
+      <p>
+        新人が gis リポジトリで作業を開始する際の手順とコマンド集です。
+      </p>
+
+      <h3>1. 環境セットアップ</h3>
+      <div class="code-filename">Terminal</div>
+      <pre><code># Node.js 22+ & pnpm の有効化
+corepack enable
+pnpm install
+
+# 全体チェック (Lint, Format, Test, Typecheck, Slop)
+pnpm check</code></pre>
+
+      <h3>2. Beads によるタスクの確認</h3>
+      <div class="code-filename">Terminal</div>
+      <pre><code># 着手可能なチケットの一覧表示
+bd ready
+
+# チケットの詳細確認
+bd show &lt;bead-id&gt;
+
+# チケットの作成
+bd create --title="機能の追加" --description="..."
+
+# 人間確認用ゲートの作成
+bd create --labels human --title="設計レビュー承認"</code></pre>
+
+      <div class="callout callout-danger">
+        <div class="callout-title">🚨 重要: Beads 操作時の鉄則</div>
+        <ol style="margin-left: 20px; line-height: 1.8;">
+          <li><strong><code>bd create</code> に <code>--parent</code> を渡さない:</strong> ID採番の競合を防ぐため、作成後に <code>bd update $ID --parent=&lt;epic&gt;</code> で紐付けます。</li>
+          <li><strong><code>bd dolt push</code> は <code>DOLT_REMOTE_INFO_BRANCH=""</code> で実行:</strong> 余分な追跡ブランチが作られるのを防ぎます。</li>
+        </ol>
+      </div>
+
+      <h3>3. gis の実行</h3>
+      <div class="code-filename">Terminal</div>
+      <pre><code># オーケストレータの起動 (フォアグラウンドで実行)
+gis run
+
+# 設定の初期化 (対話ウィザード)
+gis init
+
+# コード品質レポートの確認
+pnpm slop:report</code></pre>
+
+      <h3>4. blocked になった時の引き継ぎ手順</h3>
+      <p>
+        エージェントが自力で解決できず <code>blocked</code> になった場合、チケットの notes に<strong>「3点セット」</strong>が記録されます。
+      </p>
+      <div class="card">
+        <h4>📋 引き継ぎの3点セット</h4>
+        <ol style="margin-left: 20px; line-height: 1.8;">
+          <li><strong>Worktree パス:</strong> <code>.worktrees/{bead-id}</code>（手動で入ってコードを確認・修正）</li>
+          <li><strong>ラウンドログ:</strong> <code>.gis/run/round-*.json</code>（エージェントとレビュアーの応酬履歴）</li>
+          <li><strong>トランスクリプトパス:</strong> Claude/Codex の詳細実行ログ</li>
+        </ol>
+      </div>
+    </section>
+
+    <!-- 8. Conventions -->
+    <section id="conventions">
+      <h2><span class="section-num">8</span> 開発規約・品質基準</h2>
+      <div class="table-wrapper">
+        <table>
+          <thead>
+            <tr>
+              <th>項目</th>
+              <th>コマンド / 規約</th>
+              <th>説明</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>フォーマッタ</strong></td>
+              <td><code>pnpm format</code> (oxfmt)</td>
+              <td>高速な Rust 製フォーマッタ。コミット前に自動適用。</td>
+            </tr>
+            <tr>
+              <td><strong>リンター</strong></td>
+              <td><code>pnpm lint</code> (oxlint)</td>
+              <td><code>--deny-warnings</code> で警告ゼロを強制。</td>
+            </tr>
+            <tr>
+              <td><strong>型チェック</strong></td>
+              <td><code>pnpm typecheck</code> (tsc)</td>
+              <td><code>--noEmit</code> で型検査のみを実行。</td>
+            </tr>
+            <tr>
+              <td><strong>テスト</strong></td>
+              <td><code>pnpm test</code> (node:test)</td>
+              <td>Node.js 組み込みのテストランナーで TypeScript ビルド後を実行。</td>
+            </tr>
+            <tr>
+              <td><strong>フルチェック</strong></td>
+              <td><code>pnpm check</code></td>
+              <td>Format + Lint + Typecheck + Test + Slop Report の一括検証。</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <footer>
+      <p>gis (Ghost In the Shell) Documentation &copy; 2026. Designed for agentic multi-developer workflows.</p>
+    </footer>
+
+  </main>
+
+  <script>
+    // Highlight active section on scroll
+    window.addEventListener('DOMContentLoaded', () => {
+      const observer = new IntersectionObserver((entries) => {
+        entries.forEach(entry => {
+          if (entry.isIntersecting) {
+            const id = entry.target.getAttribute('id');
+            document.querySelectorAll('#sidebar .nav-link').forEach(link => {
+              if (link.getAttribute('href') === `#${id}`) {
+                link.classList.add('active');
+              } else {
+                link.classList.remove('active');
+              }
+            });
+          }
+        });
+      }, { rootMargin: '-20% 0px -70% 0px' });
+
+      document.querySelectorAll('section[id]').forEach(section => {
+        observer.observe(section);
+      });
+    });
+  </script>
+</body>
+</html>

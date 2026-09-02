@@ -1,6 +1,7 @@
 import { parse as parseToml } from '@iarna/toml';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import { runnerEffortError } from './runner-capabilities.js';
 
 const CONFIG_PATH = ['.gis', 'config.toml'] as const;
 
@@ -216,15 +217,23 @@ function cloneProfiles(profiles: ProfileConfig): ProfileConfig {
 function asProfileCandidate(value: unknown, path: string): ProfileCandidate {
   const record = asRecord(value, path);
   assertKnownKeys(record, PROFILE_KEYS, path);
+  const kind = asString(record.kind, `${path}.kind`);
   const effort = asString(record.effort, `${path}.effort`);
   if (!EFFORTS.has(effort as ProfileCandidate['effort'])) {
     throw new ConfigError(
       `${path}.effort must be one of low, medium, high, xhigh, or max`,
     );
   }
+  const runnerError = runnerEffortError(
+    kind,
+    effort as ProfileCandidate['effort'],
+  );
+  if (runnerError !== undefined) {
+    throw new ConfigError(`${path}.${runnerError}`);
+  }
 
   return {
-    kind: asString(record.kind, `${path}.kind`),
+    kind,
     model: asString(record.model, `${path}.model`),
     effort: effort as ProfileCandidate['effort'],
   };
@@ -265,6 +274,20 @@ function asProfiles(value: unknown): ProfileConfig {
   };
 }
 
+function validateProfileKinds(
+  profiles: ProfileConfig,
+  kinds: readonly string[],
+): void {
+  const enabled = new Set(kinds);
+  for (const name of ['plan', 'implement'] as const) {
+    if (!profiles[name].some((candidate) => enabled.has(candidate.kind))) {
+      throw new ConfigError(
+        `profiles.${name} must include at least one candidate whose kind is enabled by kinds`,
+      );
+    }
+  }
+}
+
 export function parseConfig(contents: string): GisConfig {
   let parsed: unknown;
   try {
@@ -279,6 +302,11 @@ export function parseConfig(contents: string): GisConfig {
   const source = asRecord(parsed, 'config');
   assertKnownKeys(source, TOP_LEVEL_KEYS, 'config');
   const profiles = asProfiles(source.profiles);
+  const kinds =
+    source.kinds === undefined
+      ? [...DEFAULT_CONFIG.kinds]
+      : asStringArray(source.kinds, 'kinds');
+  validateProfileKinds(profiles, kinds);
 
   return {
     concurrency:
@@ -293,10 +321,7 @@ export function parseConfig(contents: string): GisConfig {
       source.verify === undefined
         ? DEFAULT_CONFIG.verify
         : asString(source.verify, 'verify'),
-    kinds:
-      source.kinds === undefined
-        ? [...DEFAULT_CONFIG.kinds]
-        : asStringArray(source.kinds, 'kinds'),
+    kinds,
     review:
       source.review === undefined
         ? DEFAULT_CONFIG.review

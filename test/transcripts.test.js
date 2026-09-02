@@ -8,6 +8,7 @@ import {
   claudeProjectSlug,
   listClaudeTranscripts,
   listCodexTranscripts,
+  resolveAgyTranscript,
   resolveAgentSessionTranscript,
   resolveBeadTranscriptIndex,
   resolveTranscriptIndex,
@@ -96,7 +97,46 @@ test('resolves the newest Claude transcript and matching Codex session', async (
       cwd: resolve(cwd),
       claude: claudeNewest,
       codex: codexMatch,
+      agy: undefined,
     });
+  });
+});
+
+test('resolves Antigravity conversation databases by session id and cwd', async () => {
+  await withTranscriptRoots(async (home, options) => {
+    const cwd = '/repo/.worktrees/gis-vst.12';
+    const conversations = join(
+      home,
+      '.gemini',
+      'antigravity-cli',
+      'conversations',
+    );
+    const cache = join(home, '.gemini', 'antigravity-cli', 'cache');
+    await mkdir(conversations, { recursive: true });
+    await mkdir(cache, { recursive: true });
+    const transcript = join(conversations, 'agy-session.db');
+    await writeFile(transcript, 'SQLite format 3\0', 'utf8');
+    await writeFile(
+      join(cache, 'last_conversations.json'),
+      JSON.stringify({ [resolve(cwd)]: 'agy-session' }),
+      'utf8',
+    );
+
+    assert.equal(await resolveAgyTranscript(cwd, options), transcript);
+    assert.equal(await resolveTranscriptPath('agy', cwd, options), transcript);
+    assert.equal(
+      await resolveAgentSessionTranscript(
+        {
+          source: 'agy-conversations',
+          agent: 'agy',
+          kind: 'id',
+          value: 'agy-session',
+        },
+        cwd,
+        options,
+      ),
+      transcript,
+    );
   });
 });
 
@@ -298,6 +338,7 @@ test('returns no index when the official transcript roots have no matching file'
         cwd: '/repo/.worktrees/missing',
         claude: undefined,
         codex: undefined,
+        agy: undefined,
       },
     );
     assert.equal(

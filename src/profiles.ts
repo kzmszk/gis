@@ -6,6 +6,10 @@ import type {
   ProfileConfig,
   ProfileName,
 } from './config.js';
+import {
+  runnerEffortError,
+  supportsRunnerEffort,
+} from './runner-capabilities.js';
 
 export type ProfileBead = Pick<Bead, 'issue_type' | 'labels'>;
 
@@ -149,6 +153,13 @@ export function buildAgentStartArgs(
   candidate: ProfileCandidate,
   config: Pick<GisConfig, 'claude_permission_mode'> | ClaudePermissionMode,
 ): string[] {
+  const runnerError = runnerEffortError(candidate.kind, candidate.effort);
+  if (runnerError !== undefined) {
+    throw new ProfileResolutionError(
+      `${candidate.kind} candidate ${runnerError}`,
+    );
+  }
+
   if (candidate.kind === 'claude') {
     return [
       '--model',
@@ -173,6 +184,18 @@ export function buildAgentStartArgs(
     ];
   }
 
+  if (candidate.kind === 'agy') {
+    return [
+      '--model',
+      candidate.model,
+      '--effort',
+      candidate.effort,
+      '--mode',
+      'accept-edits',
+      '--sandbox',
+    ];
+  }
+
   // Other kinds are intentionally passed through without runner-specific flags.
   // Adding a kind to config should not require gis to know that runner's CLI.
   return [];
@@ -188,6 +211,7 @@ function isCandidateEligible(
 ): boolean {
   return (
     isAvailable(options.availableKinds ?? config.kinds, candidate.kind) &&
+    supportsRunnerEffort(candidate.kind, candidate.effort) &&
     !includesKind(options.excludeKinds, candidate.kind)
   );
 }

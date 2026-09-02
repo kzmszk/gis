@@ -94,6 +94,14 @@ test('builds runner-specific trailing arguments', () => {
       'acceptEdits',
     ],
   );
+  assert.throws(
+    () =>
+      buildAgentStartArgs(
+        { kind: 'agy', model: 'gemini-3.7-flash-high', effort: 'xhigh' },
+        DEFAULT_CONFIG,
+      ),
+    /agy candidate effort must be low, medium, or high for agy/,
+  );
   assert.deepEqual(
     buildAgentStartArgs(
       { kind: 'codex', model: 'gpt-5.6-luna', effort: 'xhigh' },
@@ -108,6 +116,21 @@ test('builds runner-specific trailing arguments', () => {
       'on-request',
       '-s',
       'workspace-write',
+    ],
+  );
+  assert.deepEqual(
+    buildAgentStartArgs(
+      { kind: 'agy', model: 'gemini-3.7-flash-high', effort: 'high' },
+      DEFAULT_CONFIG,
+    ),
+    [
+      '--model',
+      'gemini-3.7-flash-high',
+      '--effort',
+      'high',
+      '--mode',
+      'accept-edits',
+      '--sandbox',
     ],
   );
   assert.deepEqual(
@@ -179,6 +202,34 @@ test('does not try unavailable candidates during fallback', async () => {
 
   assert.equal(result.candidate.kind, 'codex');
   assert.deepEqual(attempts, ['codex']);
+});
+
+test('skips runner candidates with unsupported efforts during fallback', async () => {
+  const config = {
+    ...DEFAULT_CONFIG,
+    kinds: ['agy', 'codex'],
+    profiles: {
+      ...DEFAULT_CONFIG.profiles,
+      implement: [
+        { kind: 'agy', model: 'gemini-3.7-flash-high', effort: 'xhigh' },
+        { kind: 'codex', model: 'gpt-5.6-luna', effort: 'high' },
+      ],
+    },
+  };
+  const attempts = [];
+
+  const started = await startWithProfileFallback(
+    task(),
+    config,
+    async (candidate) => {
+      attempts.push(candidate);
+      return candidate.kind;
+    },
+  );
+
+  assert.equal(started.result, 'codex');
+  assert.equal(started.attempts, 1);
+  assert.deepEqual(attempts, [config.profiles.implement[1]]);
 });
 
 test('uses an explicit pipeline profile when returning a start result', async () => {

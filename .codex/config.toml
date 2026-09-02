@@ -1,3 +1,5 @@
+web_search = "indexed"
+sandbox_mode = "workspace-write"
 [features]
 hooks = true
 
