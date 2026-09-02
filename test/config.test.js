@@ -101,6 +101,35 @@ test('rejects malformed TOML and invalid settings', () => {
   }
 });
 
+test('accepts only agy reasoning efforts supported by Antigravity CLI', () => {
+  const config = parseConfig(`
+kinds = ["agy"]
+[[profiles.implement]]
+kind = "agy"
+model = "gemini-3.7-flash-high"
+effort = "high"
+`);
+  assert.deepEqual(config.profiles.implement[0], {
+    kind: 'agy',
+    model: 'gemini-3.7-flash-high',
+    effort: 'high',
+  });
+
+  for (const effort of ['xhigh', 'max']) {
+    assert.throws(
+      () =>
+        parseConfig(`
+kinds = ["agy"]
+[[profiles.implement]]
+kind = "agy"
+model = "gemini-3.7-flash-high"
+effort = "${effort}"
+`),
+      /effort must be low, medium, or high for agy/,
+    );
+  }
+});
+
 test('loads review mode without the old not-implemented warning', async () => {
   await withConfig('review = true\n', async (directory) => {
     const config = await loadConfig(directory);

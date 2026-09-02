@@ -112,6 +112,21 @@ test('builds runner-specific trailing arguments', () => {
   );
   assert.deepEqual(
     buildAgentStartArgs(
+      { kind: 'agy', model: 'gemini-3.7-flash-high', effort: 'high' },
+      DEFAULT_CONFIG,
+    ),
+    [
+      '--model',
+      'gemini-3.7-flash-high',
+      '--effort',
+      'high',
+      '--mode',
+      'accept-edits',
+      '--sandbox',
+    ],
+  );
+  assert.deepEqual(
+    buildAgentStartArgs(
       { kind: 'future-agent', model: 'future-model', effort: 'high' },
       DEFAULT_CONFIG,
     ),

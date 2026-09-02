@@ -216,6 +216,59 @@ test('starts the worker after writing the implementation prompt and injects one 
   }
 });
 
+test('passes agy model, effort, edit mode, and sandbox flags to herdr agent.start', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'gis-worker-agy-start-'));
+  let startCall;
+  let agentStarted = false;
+  try {
+    await startWorker(
+      startOptions(root, {
+        candidate: {
+          kind: 'agy',
+          model: 'gemini-3.7-flash-high',
+          effort: 'high',
+        },
+        herdr: {
+          async agentStart(options) {
+            startCall = options;
+            agentStarted = true;
+            return startedAgent(options, { agent: 'agy' });
+          },
+          async apiSnapshot() {
+            return snapshot(
+              agentStarted
+                ? [
+                    agent({
+                      agent: 'agy',
+                      interactive_ready: true,
+                      state_change_seq: 2,
+                    }),
+                  ]
+                : [],
+            );
+          },
+          async agentPrompt() {
+            return promptedAgent({ agent: 'agy' });
+          },
+        },
+      }),
+    );
+
+    assert.deepEqual(startCall.args, [
+      '--model',
+      'gemini-3.7-flash-high',
+      '--effort',
+      'high',
+      '--mode',
+      'accept-edits',
+      '--sandbox',
+    ]);
+    assert.equal(startCall.kind, 'agy');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('keeps verification and review-fix result files separate for one round', async () => {
   const root = await mkdtemp(join(tmpdir(), 'gis-worker-phases-'));
   try {

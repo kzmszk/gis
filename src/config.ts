@@ -216,15 +216,21 @@ function cloneProfiles(profiles: ProfileConfig): ProfileConfig {
 function asProfileCandidate(value: unknown, path: string): ProfileCandidate {
   const record = asRecord(value, path);
   assertKnownKeys(record, PROFILE_KEYS, path);
+  const kind = asString(record.kind, `${path}.kind`);
   const effort = asString(record.effort, `${path}.effort`);
   if (!EFFORTS.has(effort as ProfileCandidate['effort'])) {
     throw new ConfigError(
       `${path}.effort must be one of low, medium, high, xhigh, or max`,
     );
   }
+  if (kind === 'agy' && (effort === 'xhigh' || effort === 'max')) {
+    throw new ConfigError(
+      `${path}.effort must be low, medium, or high for agy`,
+    );
+  }
 
   return {
-    kind: asString(record.kind, `${path}.kind`),
+    kind,
     model: asString(record.model, `${path}.model`),
     effort: effort as ProfileCandidate['effort'],
   };

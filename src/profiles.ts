@@ -173,6 +173,18 @@ export function buildAgentStartArgs(
     ];
   }
 
+  if (candidate.kind === 'agy') {
+    return [
+      '--model',
+      candidate.model,
+      '--effort',
+      candidate.effort,
+      '--mode',
+      'accept-edits',
+      '--sandbox',
+    ];
+  }
+
   // Other kinds are intentionally passed through without runner-specific flags.
   // Adding a kind to config should not require gis to know that runner's CLI.
   return [];
