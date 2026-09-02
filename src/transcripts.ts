@@ -1,12 +1,12 @@
 import { createReadStream } from 'node:fs';
-import { readdir, stat } from 'node:fs/promises';
+import { readFile, readdir, stat } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import { homedir } from 'node:os';
 import { basename, extname, isAbsolute, join, resolve } from 'node:path';
 import type { AgentSessionInfo } from './herdr.js';
 import { requireNonEmpty } from './internal.js';
 
-export type TranscriptKind = 'claude' | 'codex';
+export type TranscriptKind = 'claude' | 'codex' | 'agy';
 
 export interface TranscriptResolverOptions {
   /** Override the home directory when resolving the standard tool paths. */
@@ -15,6 +15,10 @@ export interface TranscriptResolverOptions {
   readonly claudeProjectsDir?: string;
   /** Override `~/.codex/sessions`. */
   readonly codexSessionsDir?: string;
+  /** Override `~/.gemini/antigravity-cli/conversations`. */
+  readonly agyConversationsDir?: string;
+  /** Override `~/.gemini/antigravity-cli/cache/last_conversations.json`. */
+  readonly agyLastConversationsPath?: string;
   /** Number of JSONL records to inspect for Codex session metadata. */
   readonly maxCodexMetadataLines?: number;
   /** Ignore transcripts last modified before this worker started. */
@@ -28,6 +32,8 @@ export interface TranscriptIndex {
   readonly claude: string | undefined;
   /** The newest Codex transcript whose session metadata has this cwd. */
   readonly codex: string | undefined;
+  /** The latest Antigravity conversation database associated with this cwd. */
+  readonly agy: string | undefined;
 }
 
 export interface BeadTranscriptIndex {
@@ -66,6 +72,25 @@ function codexSessionsDirectory(options: TranscriptResolverOptions): string {
     options.codexSessionsDir ??
       join(homeDirectory(options), '.codex', 'sessions'),
     'codexSessionsDir',
+  );
+}
+
+function agyDataDirectory(options: TranscriptResolverOptions): string {
+  return join(homeDirectory(options), '.gemini', 'antigravity-cli');
+}
+
+function agyConversationsDirectory(options: TranscriptResolverOptions): string {
+  return absoluteDirectory(
+    options.agyConversationsDir ??
+      join(agyDataDirectory(options), 'conversations'),
+    'agyConversationsDir',
+  );
+}
+
+function agyLastConversationsFile(options: TranscriptResolverOptions): string {
+  return resolve(
+    options.agyLastConversationsPath ??
+      join(agyDataDirectory(options), 'cache', 'last_conversations.json'),
   );
 }
 
@@ -349,6 +374,15 @@ async function resolveCodexSessionId(
   return matches.length === 1 ? matches[0] : undefined;
 }
 
+async function resolveAgySessionId(
+  sessionId: string,
+  options: TranscriptResolverOptions,
+): Promise<string | undefined> {
+  return existingFile(
+    join(agyConversationsDirectory(options), `${sessionId}.db`),
+  );
+}
+
 /** Resolve the exact transcript reference reported by herdr for one agent session. */
 export async function resolveAgentSessionTranscript(
   session: AgentSessionInfo,
@@ -369,6 +403,9 @@ export async function resolveAgentSessionTranscript(
   }
   if (session.agent === 'codex') {
     return resolveCodexSessionId(session.value, cwd, options);
+  }
+  if (session.agent === 'agy') {
+    return resolveAgySessionId(session.value, options);
   }
   return undefined;
 }
@@ -419,6 +456,36 @@ export async function resolveCodexTranscript(
   return (await listCodexTranscripts(cwd, options))[0];
 }
 
+async function agyLastConversations(
+  options: TranscriptResolverOptions,
+): Promise<Record<string, unknown>> {
+  const contents = await withMissingPathFallback(
+    () => readFile(agyLastConversationsFile(options), 'utf8'),
+    undefined,
+  );
+  if (contents === undefined) {
+    return {};
+  }
+  try {
+    return asRecord(JSON.parse(contents) as unknown) ?? {};
+  } catch {
+    return {};
+  }
+}
+
+/** Resolve Antigravity's latest conversation database for a cwd. */
+export async function resolveAgyTranscript(
+  cwd: string,
+  options: TranscriptResolverOptions = {},
+): Promise<string | undefined> {
+  const sessionId = nonEmptyString(
+    (await agyLastConversations(options))[absoluteCwd(cwd)],
+  );
+  return sessionId === undefined
+    ? undefined
+    : resolveAgySessionId(sessionId, options);
+}
+
 /** Resolve one runner's transcript. Both `(kind, cwd)` and `(cwd, kind)` are accepted. */
 export async function resolveTranscriptPath(
   kind: TranscriptKind,
@@ -435,7 +502,7 @@ export async function resolveTranscriptPath(
   second: string,
   options: TranscriptResolverOptions = {},
 ): Promise<string | undefined> {
-  const isKind = first === 'claude' || first === 'codex';
+  const isKind = first === 'claude' || first === 'codex' || first === 'agy';
   const kind = (isKind ? first : second) as TranscriptKind;
   const cwd = isKind ? second : first;
 
@@ -445,20 +512,24 @@ export async function resolveTranscriptPath(
   if (kind === 'codex') {
     return resolveCodexTranscript(cwd, options);
   }
+  if (kind === 'agy') {
+    return resolveAgyTranscript(cwd, options);
+  }
   throw new TypeError(`unsupported transcript kind: ${kind}`);
 }
 
-/** Resolve the two official transcript locations without copying or creating logs. */
+/** Resolve official transcript locations without copying or creating logs. */
 export async function resolveTranscriptIndex(
   cwd: string,
   options: TranscriptResolverOptions = {},
 ): Promise<TranscriptIndex> {
   const absolute = absoluteCwd(cwd);
-  const [claude, codex] = await Promise.all([
+  const [claude, codex, agy] = await Promise.all([
     resolveClaudeTranscript(absolute, options),
     resolveCodexTranscript(absolute, options),
+    resolveAgyTranscript(absolute, options),
   ]);
-  return { cwd: absolute, claude, codex };
+  return { cwd: absolute, claude, codex, agy };
 }
 
 /** Add the bead/worktree identity to one resolved path for bd notes or other indexes. */

@@ -184,7 +184,7 @@ test('serializes a config accepted by the config parser', async () => {
         profiles: {
           plan: [{ kind: 'codex', model: 'plan', effort: 'high' }],
           implement: [{ kind: 'codex', model: 'impl', effort: 'xhigh' }],
-          review: [{ kind: 'claude', model: 'review', effort: 'max' }],
+          review: [{ kind: 'codex', model: 'review', effort: 'max' }],
         },
       }),
       'utf8',

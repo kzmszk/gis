@@ -6,6 +6,7 @@ import type {
   ProfileConfig,
   ProfileName,
 } from './config.js';
+import { runnerEffortError } from './runner-capabilities.js';
 
 export type ProfileBead = Pick<Bead, 'issue_type' | 'labels'>;
 
@@ -149,6 +150,13 @@ export function buildAgentStartArgs(
   candidate: ProfileCandidate,
   config: Pick<GisConfig, 'claude_permission_mode'> | ClaudePermissionMode,
 ): string[] {
+  const runnerError = runnerEffortError(candidate.kind, candidate.effort);
+  if (runnerError !== undefined) {
+    throw new ProfileResolutionError(
+      `${candidate.kind} candidate ${runnerError}`,
+    );
+  }
+
   if (candidate.kind === 'claude') {
     return [
       '--model',

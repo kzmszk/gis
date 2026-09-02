@@ -94,6 +94,14 @@ test('builds runner-specific trailing arguments', () => {
       'acceptEdits',
     ],
   );
+  assert.throws(
+    () =>
+      buildAgentStartArgs(
+        { kind: 'agy', model: 'gemini-3.7-flash-high', effort: 'xhigh' },
+        DEFAULT_CONFIG,
+      ),
+    /agy candidate effort must be low, medium, or high for agy/,
+  );
   assert.deepEqual(
     buildAgentStartArgs(
       { kind: 'codex', model: 'gpt-5.6-luna', effort: 'xhigh' },
