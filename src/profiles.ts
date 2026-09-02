@@ -6,7 +6,10 @@ import type {
   ProfileConfig,
   ProfileName,
 } from './config.js';
-import { runnerEffortError } from './runner-capabilities.js';
+import {
+  runnerEffortError,
+  supportsRunnerEffort,
+} from './runner-capabilities.js';
 
 export type ProfileBead = Pick<Bead, 'issue_type' | 'labels'>;
 
@@ -208,6 +211,7 @@ function isCandidateEligible(
 ): boolean {
   return (
     isAvailable(options.availableKinds ?? config.kinds, candidate.kind) &&
+    supportsRunnerEffort(candidate.kind, candidate.effort) &&
     !includesKind(options.excludeKinds, candidate.kind)
   );
 }

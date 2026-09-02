@@ -152,6 +152,26 @@ effort = "high"
   );
 });
 
+test('allows a review profile whose kinds are unavailable for cross-kind fallback', () => {
+  const config = parseConfig(`
+kinds = ["codex"]
+[[profiles.plan]]
+kind = "codex"
+model = "plan"
+effort = "high"
+[[profiles.implement]]
+kind = "codex"
+model = "implement"
+effort = "high"
+[[profiles.review]]
+kind = "claude"
+model = "review"
+effort = "high"
+`);
+
+  assert.equal(config.profiles.review[0].kind, 'claude');
+});
+
 test('loads review mode without the old not-implemented warning', async () => {
   await withConfig('review = true\n', async (directory) => {
     const config = await loadConfig(directory);

@@ -279,7 +279,7 @@ function validateProfileKinds(
   kinds: readonly string[],
 ): void {
   const enabled = new Set(kinds);
-  for (const name of PROFILE_NAMES) {
+  for (const name of ['plan', 'implement'] as const) {
     if (!profiles[name].some((candidate) => enabled.has(candidate.kind))) {
       throw new ConfigError(
         `profiles.${name} must include at least one candidate whose kind is enabled by kinds`,

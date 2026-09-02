@@ -14,9 +14,6 @@
 # gis runtime artifacts
 .gis/run/
 
-# Local Codex configuration
-.codex/
-
 # Node.js dependencies
 node_modules/
 

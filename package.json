@@ -21,7 +21,6 @@
     "slop:verify": "pnpm run build && node dist/cli.js slop",
     "prepare": "husky",
     "test": "pnpm run build && node --test",
-    "test:agy:e2e": "pnpm run build && GIS_AGY_E2E=1 node --test test/agy.e2e.test.js",
     "test:coverage": "pnpm run build && node --enable-source-maps --experimental-test-coverage --test-coverage-exclude=\"test/**\" --test",
     "typecheck": "tsc --noEmit"
   },
