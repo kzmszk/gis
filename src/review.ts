@@ -110,15 +110,7 @@ function reviewAgentName(beadId: string): string {
 export { reviewAgentName };
 
 function paneIdFromSplit(result: PaneSplitResult): string | undefined {
-  const candidates: unknown[] = [
-    result.pane_id,
-    result.pane?.pane_id,
-    result.new_pane?.pane_id,
-    (result as { created_pane?: { pane_id?: unknown } }).created_pane?.pane_id,
-  ];
-  return candidates.find(
-    (value): value is string => typeof value === 'string' && value.length > 0,
-  );
+  return result.pane.pane_id;
 }
 
 /** Split beside the implementation pane using Herdr's pane.split API. */

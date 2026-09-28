@@ -9,6 +9,7 @@ import {
   HerdrAdapter,
   HerdrApiError,
   HerdrConnectionError,
+  HerdrProtocolError,
 } from '../dist/herdr.js';
 
 async function withHerdrSocket(handler, callback) {
@@ -48,6 +49,21 @@ function reply(socket, request, result) {
   socket.end(`${JSON.stringify({ id: request.id, result })}\n`);
 }
 
+async function rejectsInvalidResult(invoke, result, detail) {
+  await withHerdrSocket(
+    async (request, socket) => reply(socket, request, result),
+    async (socketPath) => {
+      const herdr = new HerdrAdapter(socketPath);
+      await assert.rejects(
+        invoke(herdr),
+        (error) =>
+          error instanceof HerdrProtocolError &&
+          (detail === undefined || error.message.includes(detail)),
+      );
+    },
+  );
+}
+
 test("runs the worktree and agent lifecycle over herdr's socket API", async () => {
   await withHerdrSocket(
     async (request, socket) => {
@@ -64,6 +80,7 @@ test("runs the worktree and agent lifecycle over herdr's socket API", async () =
               agent_status: 'unknown',
             },
             worktree: { path: '/tmp/gis-vst.4', label: 'gis-vst.4' },
+            extension_field: { protocol_revision: 2 },
           });
           break;
         case 'worktree.remove':
@@ -82,6 +99,7 @@ test("runs the worktree and agent lifecycle over herdr's socket API", async () =
               workspace_id: 'ws-1',
               tab_id: 'tab-1',
               agent_status: 'idle',
+              agent: 'gis-vst.4',
             },
             argv: ['codex', '-m', 'gpt-5.6-luna'],
           });
@@ -94,6 +112,7 @@ test("runs the worktree and agent lifecycle over herdr's socket API", async () =
               workspace_id: 'ws-1',
               tab_id: 'tab-1',
               agent_status: 'working',
+              agent: 'gis-vst.4',
             },
           });
           break;
@@ -148,6 +167,7 @@ test("runs the worktree and agent lifecycle over herdr's socket API", async () =
         base: 'main',
       });
       assert.equal(worktree.worktree.path, '/tmp/gis-vst.4');
+      assert.deepEqual(worktree.extension_field, { protocol_revision: 2 });
 
       await herdr.agentStart({
         name: 'gis-vst.4',
@@ -229,7 +249,385 @@ test('surfaces herdr API errors with their machine-readable code', async () => {
         (error) =>
           error instanceof HerdrApiError &&
           error.code === 'not_git_worktree' &&
+          error.data === undefined &&
           error.message.includes('not a git worktree'),
+      );
+    },
+  );
+});
+
+test('preserves API error data and rejects malformed error envelopes', async (t) => {
+  await withHerdrSocket(
+    async (request, socket) =>
+      socket.end(
+        JSON.stringify({
+          id: request.id,
+          error: {
+            code: 'invalid_request',
+            message: 'bad request',
+            data: { field: 'branch', extension: true },
+          },
+        }) + '\n',
+      ),
+    async (socketPath) => {
+      const herdr = new HerdrAdapter(socketPath);
+      await assert.rejects(
+        herdr.worktreeCreate({ branch: 'gis-vst.4' }),
+        (error) =>
+          error instanceof HerdrApiError &&
+          error.code === 'invalid_request' &&
+          error.data?.field === 'branch' &&
+          error.data?.extension === true,
+      );
+    },
+  );
+
+  for (const [field, value] of [
+    ['code', undefined],
+    ['code', 42],
+    ['message', undefined],
+    ['message', { text: 'bad' }],
+  ]) {
+    await t.test(`rejects malformed error ${field}`, async () => {
+      await withHerdrSocket(
+        async (request, socket) => {
+          const error = { code: 'invalid_request', message: 'bad request' };
+          error[field] = value;
+          socket.end(JSON.stringify({ id: request.id, error }) + '\n');
+        },
+        async (socketPath) => {
+          const herdr = new HerdrAdapter(socketPath);
+          await assert.rejects(
+            herdr.worktreeCreate({ branch: 'gis-vst.4' }),
+            (error) =>
+              error instanceof HerdrProtocolError &&
+              error.message.includes(`response.error.${field}`),
+          );
+        },
+      );
+    });
+  }
+});
+
+test('validates every successful Herdr method result at the API boundary', async (t) => {
+  const pane = {
+    pane_id: 'pane-1',
+    workspace_id: 'ws-1',
+    tab_id: 'tab-1',
+    agent_status: 'idle',
+  };
+  const snapshot = {
+    type: 'session_snapshot',
+    snapshot: {
+      version: '0.7.5',
+      protocol: 17,
+      workspaces: [],
+      tabs: [],
+      panes: [],
+      layouts: [],
+      agents: [],
+    },
+  };
+
+  await t.test(
+    'worktree.create requires path and workspace identity',
+    async () => {
+      await rejectsInvalidResult(
+        (herdr) => herdr.worktreeCreate({ branch: 'gis-vst.4' }),
+        {
+          type: 'worktree_created',
+          workspace: { workspace_id: 'ws-1', label: 'gis-vst.4' },
+          tab: { tab_id: 'tab-1', workspace_id: 'ws-1' },
+          root_pane: pane,
+          worktree: { label: 'gis-vst.4' },
+        },
+        'worktree.create result.worktree.path',
+      );
+    },
+  );
+
+  await t.test(
+    'worktree.create validates workspace independently',
+    async () => {
+      await rejectsInvalidResult(
+        (herdr) => herdr.worktreeCreate({ branch: 'gis-vst.4' }),
+        {
+          type: 'worktree_created',
+          workspace: { label: 'gis-vst.4' },
+          tab: { tab_id: 'tab-1', workspace_id: 'ws-1' },
+          root_pane: pane,
+          worktree: { path: '/tmp/gis-vst.4' },
+        },
+        'worktree.create result.workspace.workspace_id',
+      );
+    },
+  );
+
+  await t.test('worktree.remove requires a workspace id', async () => {
+    await rejectsInvalidResult(
+      (herdr) => herdr.worktreeRemove('ws-1'),
+      {
+        type: 'worktree_removed',
+        workspace_id: 7,
+        path: '/tmp/gis-vst.4',
+        forced: false,
+      },
+      'worktree.remove result.workspace_id',
+    );
+  });
+
+  await t.test('pane.split requires its discriminant and pane id', async () => {
+    await rejectsInvalidResult(
+      (herdr) => herdr.paneSplit(),
+      { type: 'pane_info', extension_field: true },
+      'pane.split result.pane must be an object',
+    );
+  });
+
+  await t.test(
+    'pane.split accepts the current pane_info response shape',
+    async () => {
+      await withHerdrSocket(
+        async (request, socket) =>
+          reply(socket, request, {
+            type: 'pane_info',
+            pane: { pane_id: 'review-pane', extension_field: 'allowed' },
+          }),
+        async (socketPath) => {
+          const herdr = new HerdrAdapter(socketPath);
+          const result = await herdr.paneSplit();
+          assert.equal(result.type, 'pane_info');
+          assert.equal(result.pane.pane_id, 'review-pane');
+          assert.equal(result.pane.extension_field, 'allowed');
+        },
+      );
+    },
+  );
+
+  await t.test('agent.start validates identity and status', async () => {
+    await rejectsInvalidResult(
+      (herdr) =>
+        herdr.agentStart({
+          name: 'gis-vst.4',
+          kind: 'codex',
+          paneId: 'pane-1',
+        }),
+      {
+        type: 'agent_started',
+        agent: { pane_id: 'pane-1', workspace_id: 'ws-1', tab_id: 'tab-1' },
+        argv: [],
+      },
+      'agent.start result.agent.agent_status',
+    );
+  });
+
+  await t.test('agent.prompt validates agent identity', async () => {
+    await rejectsInvalidResult(
+      (herdr) => herdr.agentPrompt('gis-vst.4', 'hello'),
+      { type: 'agent_prompted', agent: pane },
+      'agent.prompt result.agent.agent',
+    );
+  });
+
+  await t.test(
+    'agent.start accepts empty arguments but rejects non-strings',
+    async () => {
+      const result = {
+        type: 'agent_started',
+        agent: { ...pane, agent: 'gis-vst.4' },
+        argv: ['codex', '', ' '],
+      };
+      const start = (herdr) =>
+        herdr.agentStart({
+          name: 'gis-vst.4',
+          kind: 'codex',
+          paneId: 'pane-1',
+        });
+      await withHerdrSocket(
+        async (request, socket) => reply(socket, request, result),
+        async (socketPath) => {
+          const response = await start(new HerdrAdapter(socketPath));
+          assert.deepEqual(response.argv, result.argv);
+        },
+      );
+      await rejectsInvalidResult(
+        start,
+        { ...result, argv: ['codex', 42] },
+        'agent.start result.argv[1]',
+      );
+    },
+  );
+
+  await t.test('agent.wait validates event payload', async () => {
+    await rejectsInvalidResult(
+      (herdr) => herdr.agentWait('gis-vst.4'),
+      {
+        type: 'wait_matched',
+        event: { event: 'pane_agent_status_changed', data: { type: 4 } },
+      },
+      'agent.wait result.event.data.type',
+    );
+  });
+
+  await t.test(
+    'agent.wait accepts the already-matched agent_info variant',
+    async () => {
+      await withHerdrSocket(
+        async (request, socket) =>
+          reply(socket, request, {
+            type: 'agent_info',
+            agent: { ...pane, agent: 'gis-vst.4' },
+          }),
+        async (socketPath) => {
+          const herdr = new HerdrAdapter(socketPath);
+          const result = await herdr.agentWait('gis-vst.4');
+          assert.equal(result.type, 'agent_info');
+          assert.equal(result.agent.agent, 'gis-vst.4');
+        },
+      );
+    },
+  );
+
+  await t.test('agent.read validates pane id and read fields', async () => {
+    await rejectsInvalidResult(
+      (herdr) => herdr.agentRead('gis-vst.4'),
+      {
+        type: 'pane_read',
+        read: {
+          source: 'recent',
+          format: 'text',
+          text: 'done',
+          revision: 1,
+          truncated: false,
+        },
+      },
+      'agent.read result.read.pane_id',
+    );
+  });
+
+  await t.test('agent.read validates fields beyond pane id', async () => {
+    await rejectsInvalidResult(
+      (herdr) => herdr.agentRead('gis-vst.4'),
+      {
+        type: 'pane_read',
+        read: {
+          pane_id: 'pane-1',
+          source: 'recent',
+          format: 'text',
+          text: 'done',
+          revision: '1',
+          truncated: false,
+        },
+      },
+      'agent.read result.read.revision',
+    );
+  });
+
+  await t.test('session.snapshot validates every required array', async () => {
+    for (const field of ['workspaces', 'tabs', 'panes', 'layouts', 'agents']) {
+      const withoutField = { ...snapshot.snapshot };
+      delete withoutField[field];
+      await rejectsInvalidResult(
+        (herdr) => herdr.apiSnapshot(),
+        { ...snapshot, snapshot: withoutField },
+        `session.snapshot result.snapshot.${field}`,
+      );
+    }
+  });
+});
+
+test('rejects a wrong result discriminant for every Herdr method', async () => {
+  const cases = [
+    ['worktree.create', (herdr) => herdr.worktreeCreate({ branch: 'b' })],
+    ['worktree.remove', (herdr) => herdr.worktreeRemove('ws')],
+    ['pane.split', (herdr) => herdr.paneSplit()],
+    [
+      'agent.start',
+      (herdr) =>
+        herdr.agentStart({ name: 'agent', kind: 'codex', paneId: 'pane' }),
+    ],
+    ['agent.prompt', (herdr) => herdr.agentPrompt('agent', 'hello')],
+    ['agent.wait', (herdr) => herdr.agentWait('agent')],
+    ['agent.read', (herdr) => herdr.agentRead('agent')],
+    ['session.snapshot', (herdr) => herdr.apiSnapshot()],
+  ];
+  for (const [method, invoke] of cases) {
+    await rejectsInvalidResult(
+      invoke,
+      { type: 'unexpected_result_type' },
+      `${method} result.type`,
+    );
+  }
+});
+
+test('classifies malformed Herdr envelopes as typed protocol errors', async () => {
+  const missingSocket = join(
+    tmpdir(),
+    `gis-herdr-missing-${process.pid}-${Date.now()}.sock`,
+  );
+  await assert.rejects(
+    new HerdrAdapter(missingSocket).apiSnapshot(),
+    (error) => error instanceof HerdrConnectionError,
+  );
+
+  await withHerdrSocket(
+    async (request, socket) => socket.end('\n'),
+    async (socketPath) => {
+      const herdr = new HerdrAdapter(socketPath);
+      await assert.rejects(
+        herdr.apiSnapshot(),
+        (error) => error instanceof HerdrProtocolError,
+      );
+    },
+  );
+
+  await withHerdrSocket(
+    async (request, socket) => socket.end('null\n'),
+    async (socketPath) => {
+      const herdr = new HerdrAdapter(socketPath);
+      await assert.rejects(
+        herdr.apiSnapshot(),
+        (error) => error instanceof HerdrProtocolError,
+      );
+    },
+  );
+
+  for (const response of ['[]', '"text"', '7']) {
+    await withHerdrSocket(
+      async (request, socket) => socket.end(`${response}\n`),
+      async (socketPath) => {
+        const herdr = new HerdrAdapter(socketPath);
+        await assert.rejects(
+          herdr.apiSnapshot(),
+          (error) => error instanceof HerdrProtocolError,
+        );
+      },
+    );
+  }
+
+  await withHerdrSocket(
+    async (request, socket) => socket.end('{"id":\n'),
+    async (socketPath) => {
+      const herdr = new HerdrAdapter(socketPath);
+      await assert.rejects(
+        herdr.apiSnapshot(),
+        (error) => error instanceof HerdrProtocolError,
+      );
+    },
+  );
+
+  await withHerdrSocket(
+    async (request, socket) =>
+      socket.end(
+        JSON.stringify({ id: `${request.id}-other`, result: {} }) + '\n',
+      ),
+    async (socketPath) => {
+      const herdr = new HerdrAdapter(socketPath);
+      await assert.rejects(
+        herdr.apiSnapshot(),
+        (error) =>
+          error instanceof HerdrProtocolError &&
+          error.message.includes('does not match request'),
       );
     },
   );

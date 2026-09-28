@@ -310,6 +310,7 @@ test('gis run connects default bd, herdr, and git adapters through merge cleanup
             workspace_id: `ws-${bead.id}`,
             tab_id: `tab-${bead.id}`,
             agent_status: 'working',
+            agent: agentName,
           },
           argv: request.params.args ?? [],
         };
@@ -344,6 +345,7 @@ test('gis run connects default bd, herdr, and git adapters through merge cleanup
             workspace_id: `ws-${bead.id}`,
             tab_id: `tab-${bead.id}`,
             agent_status: 'working',
+            agent: agentName,
             agent_session: {
               source: 'integration-test',
               agent: 'codex',

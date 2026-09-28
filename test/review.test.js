@@ -356,7 +356,7 @@ test('starts review in a split pane and prefers a different kind', async () => {
       herdr: {
         async paneSplit(options) {
           calls.push(['split', options]);
-          return { type: 'pane_split', pane: { pane_id: 'review-pane' } };
+          return { type: 'pane_info', pane: { pane_id: 'review-pane' } };
         },
         async apiSnapshot() {
           calls.push(['snapshot']);
@@ -412,7 +412,7 @@ test('falls back to same kind when the different reviewer cannot start', async (
       config: config(),
       herdr: {
         async paneSplit() {
-          return { type: 'pane_split', pane: { pane_id: 'review-pane' } };
+          return { type: 'pane_info', pane: { pane_id: 'review-pane' } };
         },
         async apiSnapshot() {
           snapshots += 1;
@@ -462,7 +462,7 @@ test('falls back to the implementation model after stronger reviewer candidates 
       config: config(),
       herdr: {
         async paneSplit() {
-          return { type: 'pane_split', pane: { pane_id: 'review-pane' } };
+          return { type: 'pane_info', pane: { pane_id: 'review-pane' } };
         },
         async apiSnapshot() {
           snapshots += 1;
@@ -529,7 +529,7 @@ test('does not retry an implementation candidate already present in the review p
         config: reviewConfig,
         herdr: {
           async paneSplit() {
-            return { type: 'pane_split', pane: { pane_id: 'review-pane' } };
+            return { type: 'pane_info', pane: { pane_id: 'review-pane' } };
           },
           async apiSnapshot() {
             return readySnapshot();
@@ -570,7 +570,7 @@ test('rejects a mismatched implementation kind before splitting a reviewer pane'
       herdr: {
         async paneSplit() {
           splitCalls += 1;
-          return { type: 'pane_split', pane: { pane_id: 'review-pane' } };
+          return { type: 'pane_info', pane: { pane_id: 'review-pane' } };
         },
         async apiSnapshot() {
           return readySnapshot();
@@ -610,7 +610,7 @@ test('falls back after a reviewer readiness failure as well as agent.start failu
       config: config(),
       herdr: {
         async paneSplit() {
-          return { type: 'pane_split', pane: { pane_id: 'review-pane' } };
+          return { type: 'pane_info', pane: { pane_id: 'review-pane' } };
         },
         async apiSnapshot() {
           stateChangeSeq += 1;
@@ -668,7 +668,7 @@ test('does not restart another reviewer after a prompt-phase startup failure', a
         config: config(),
         herdr: {
           async paneSplit() {
-            return { type: 'pane_split', pane: { pane_id: 'review-pane' } };
+            return { type: 'pane_info', pane: { pane_id: 'review-pane' } };
           },
           async apiSnapshot() {
             snapshots += 1;
@@ -842,7 +842,7 @@ test('returns implementation fixes to the original pane and re-reviews the same 
       herdr: {
         async paneSplit(options) {
           events.push(['split', options.targetPaneId]);
-          return { type: 'pane_split', pane: { pane_id: 'review-pane' } };
+          return { type: 'pane_info', pane: { pane_id: 'review-pane' } };
         },
         async apiSnapshot() {
           herdrSnapshots += 1;
@@ -1041,7 +1041,7 @@ for (const scenario of [
         },
         herdr: {
           async paneSplit() {
-            return { type: 'pane_split', pane: { pane_id: 'review-pane' } };
+            return { type: 'pane_info', pane: { pane_id: 'review-pane' } };
           },
           async apiSnapshot() {
             snapshotCalls += 1;
@@ -1266,7 +1266,7 @@ test('uses the reviewer session for reviewer blocked handoff locations', async (
       },
       herdr: {
         async paneSplit() {
-          return { type: 'pane_split', pane: { pane_id: 'reviewer-pane' } };
+          return { type: 'pane_info', pane: { pane_id: 'reviewer-pane' } };
         },
         async apiSnapshot() {
           snapshotSequence += 1;
@@ -1411,7 +1411,7 @@ function readyReviewerHerdr({ reviewerName, agentKind = 'claude', onPrompt }) {
   let snapshotCalls = 0;
   return {
     async paneSplit() {
-      return { type: 'pane_split', pane: { pane_id: 'review-pane' } };
+      return { type: 'pane_info', pane: { pane_id: 'review-pane' } };
     },
     async apiSnapshot() {
       snapshotCalls += 1;
